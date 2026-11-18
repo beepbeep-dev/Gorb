@@ -12,6 +12,7 @@ dependencies = ["numpy"]
 
 [project.optional-dependencies]
 radio = ["sounddevice", "pyserial"]
+small = ["pyserial"]
 
 [project.scripts]
 gorb = "gorb.cli:main"

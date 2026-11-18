@@ -70,7 +70,7 @@ gorb relay --callsign RELAY-1 --pos 8,0
 gorb browse --callsign ME-1 --pos 16,0
 ```
 
-## Use a real radio
+## Use a real ham radio (needs a license)
 
 Wire the computer's sound card **output → radio mic input** and the radio's
 **speaker → sound card input** (a USB radio interface like a Digirig or
@@ -97,6 +97,43 @@ callsign every 10 minutes by default). Ham rules also forbid encryption, so
 G.O.R.B pages are never encrypted. Licence-free radios (FRS/PMR446 etc.) often
 don't allow data at all. Check the rules where you live.
 
+# G.O.R.B Small (license-free, ESP32 + LoRa)
+
+Ham G.O.R.B needs a radio license. **G.O.R.B Small** doesn't: it runs on
+cheap ESP32 boards with a LoRa radio chip (about $20, like a Heltec WiFi LoRa 32
+or a LilyGo T3), on ISM bands anyone may use as long as they keep to the
+power and airtime limits.
+
+* About 6 to 12 kbit/s, much faster than ham G.O.R.B at 1200 baud. A small
+  page loads in a few seconds.
+* Range is from hundreds of metres in a city to several km with line of sight.
+* Plug the board into your computer to browse or host, or leave it running on
+  its own as a battery relay to grow the network (rule 2).
+* G.O.R.B Small and ham G.O.R.B are separate networks that can't hear each other.
+
+```bash
+pip install -e ".[small]"
+```
+
+```bash
+gorb regions
+```
+
+```bash
+gorb browse --small EU868 --device /dev/ttyUSB0 --callsign my-station
+```
+
+| region | frequency | limits |
+|---|---|---|
+| EU868 | 869.525 MHz | 500 mW, 10% duty cycle |
+| EU433 | 433.875 MHz | 10 mW, 10% duty cycle |
+| US915 | 915.0 MHz | 1 W (US/Canada) |
+| AU915 | 917.0 MHz | 1 W (Australia/NZ) |
+| IN865 | 866.0 MHz | 1 W (India) |
+
+Flashing, supported boards and wiring: see [firmware/gorb-small](firmware/gorb-small/README.md).
+These presets are a starting point, not legal advice. Check your country's rules.
+
 ## Commands
 
 | command | what it does |
@@ -108,6 +145,8 @@ don't allow data at all. Check the rules where you live.
 | `gorb encode page.html out.wav` | turn a page into a sound file you can play into any radio |
 | `gorb decode in.wav` | turn a recording (e.g. from an SDR) back into the page |
 | `gorb demo` | host + relay + browser on the simulated band |
+| `gorb regions` | list G.O.R.B Small license-free band presets |
+| `gorb esp32 --device PORT --small REGION` | set up an ESP32 board (e.g. as a standalone relay) |
 | `gorb --rules` | print the rules |
 
 ## How the rules are built in
@@ -141,5 +180,7 @@ don't allow data at all. Check the rules where you live.
 | `gorb/node.py` | hosting, fetching, chunking, retries, relaying |
 | `gorb/browser.py` | the browser window |
 | `gorb/rules.py` | the rules and the content filter |
+| `gorb/small.py` | G.O.R.B Small: regions and the ESP32 serial link |
+| `firmware/gorb-small/` | ESP32 LoRa firmware |
 
 Tests: `python -m unittest discover tests`

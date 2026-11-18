@@ -7,8 +7,9 @@
     gorb demo                                         host + relay + browser, all simulated
     gorb encode page.html out.wav / gorb decode in.wav   offline / SDR use
 
-Add --radio to use a real radio through your sound card instead of the
-simulated band (needs: pip install sounddevice).
+Add --radio to use a ham radio through your sound card (needs a license and
+pip install sounddevice), or --small REGION --device PORT for license-free
+G.O.R.B Small over an ESP32 LoRa board (needs pip install pyserial).
 """
 
 from __future__ import annotations
@@ -31,8 +32,13 @@ from .transport import AudioTransport, SimTransport, Transport
 
 def _add_radio_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--callsign", required=True,
-                   help="your station name; on ham bands this must be your licensed callsign")
-    p.add_argument("--radio", action="store_true", help="use a real radio via the sound card")
+                   help="your station name; on ham bands (--radio) this must be your licensed "
+                        "callsign, on G.O.R.B Small (--small) any name works")
+    p.add_argument("--radio", action="store_true", help="ham G.O.R.B: real radio via the sound card")
+    p.add_argument("--small", metavar="REGION",
+                   help="G.O.R.B Small: license-free LoRa via an ESP32 (see 'gorb regions')")
+    p.add_argument("--device", help="serial port of the ESP32 for --small, e.g. /dev/ttyUSB0 or COM3")
+    p.add_argument("--power", type=int, help="--small transmit power in dBm (capped to the legal limit)")
     p.add_argument("--input-device", help="sound card input (radio speaker), see --list-devices")
     p.add_argument("--output-device", help="sound card output (radio mic)")
     p.add_argument("--ptt", metavar="PORT", help="serial port that keys the radio (e.g. /dev/ttyUSB0)")
@@ -54,6 +60,13 @@ def _add_radio_args(p: argparse.ArgumentParser) -> None:
 
 
 def _transport(a: argparse.Namespace) -> Transport:
+    if a.small and a.radio:
+        raise SystemExit("pick one: --radio (ham G.O.R.B) or --small (G.O.R.B Small)")
+    if a.small:
+        if not a.device:
+            raise SystemExit("--small needs --device (the ESP32's serial port)")
+        from .small import LoRaSerialTransport
+        return LoRaSerialTransport(a.device, a.small.upper(), a.power, relay=not a.no_relay)
     if a.radio:
         def dev(v):
             return int(v) if v is not None and v.isdigit() else v
@@ -169,6 +182,28 @@ def cmd_demo(a):
             n.stop()
 
 
+def cmd_regions(a):
+    from .small import REGIONS
+    print("G.O.R.B Small license-free regions (check your local rules, they change):\n")
+    for r in REGIONS.values():
+        print(f"  {r.name:6} {r.freq_mhz:8.3f} MHz  BW {r.bw_khz:g} kHz SF{r.sf}  "
+              f"~{r.bitrate / 1000:.1f} kbit/s  max {r.max_dbm} dBm  duty {r.duty:.0%}")
+        print(f"         {r.note}")
+
+
+def cmd_esp32(a):
+    """Configure a board (saved on it) and print its status, then exit.
+    Unplug it afterwards and it keeps relaying on battery power."""
+    from .small import LoRaSerialTransport
+    t = LoRaSerialTransport(a.device, a.small.upper(), a.power, relay=not a.no_relay)
+    t.start(lambda frame: None)
+    print(f"board says: {t.hello}")
+    print(f"saved: region {t.region.name} at {t.region.freq_mhz} MHz, "
+          f"{t.power} dBm, relay {'on' if t.relay else 'off'}.")
+    print("Unplug it and power it from a battery: it keeps relaying for everyone (rule 2).")
+    t.close()
+
+
 def cmd_encode(a):
     cfg = ModemConfig(sample_rate=a.rate)
     data = Path(a.input).read_bytes()
@@ -254,6 +289,16 @@ def main(argv=None):
     s.add_argument("--realtime", action="store_true")
     s.add_argument("-v", "--verbose", action="store_true")
     s.set_defaults(fn=cmd_demo)
+
+    s = sub.add_parser("regions", help="list G.O.R.B Small license-free band presets")
+    s.set_defaults(fn=cmd_regions)
+
+    s = sub.add_parser("esp32", help="set up an ESP32 LoRa board (e.g. as a standalone relay)")
+    s.add_argument("--device", required=True, help="serial port, e.g. /dev/ttyUSB0 or COM3")
+    s.add_argument("--small", required=True, metavar="REGION", help="see 'gorb regions'")
+    s.add_argument("--power", type=int)
+    s.add_argument("--no-relay", action="store_true")
+    s.set_defaults(fn=cmd_esp32)
 
     s = sub.add_parser("encode", help="turn an HTML file into a WAV you can transmit")
     s.add_argument("input")

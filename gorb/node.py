@@ -98,7 +98,8 @@ class Node:
             if not DOMAIN_RE.match(domain):
                 raise GorbError(f"bad gorb domain {domain!r} (use something like cats.gorb)")
             self.sites[domain] = Path(d).resolve()
-        self.relay = relay
+        # On G.O.R.B Small the ESP32 relays by itself, even with no computer.
+        self.relay = relay and not getattr(transport, "relays_in_hardware", False)
         self.beacon_interval = beacon_interval
         self.ttl = ttl
 
@@ -116,6 +117,9 @@ class Node:
 
     # ------------------------------------------------------------------ life
     def start(self) -> "Node":
+        if hasattr(self.transport, "set_local_names"):
+            # Tell the radio which packets are ours so it doesn't relay them.
+            self.transport._names = [self.callsign, *self.sites]
         self.transport.start(self._on_frame)
         threading.Thread(target=self._tx_loop, daemon=True, name="gorb-tx").start()
         if self.beacon_interval > 0:
@@ -146,7 +150,8 @@ class Node:
                 waited += delay
             elapsed = time.monotonic() - self._started
             air = self.transport.airtime(len(frame))
-            if elapsed > 5 and (self._tx_time + air) / elapsed > rules.MAX_TX_DUTY:
+            duty = min(rules.MAX_TX_DUTY, getattr(self.transport, "max_duty", 1.0))
+            if elapsed > 5 and (self._tx_time + air) / elapsed > duty:
                 time.sleep(air)
             try:
                 self.transport.send(frame)
@@ -272,7 +277,8 @@ class Node:
             cached = self._responses.get(key)
         if cached is None:
             blob = self._build_response(pkt.dst, pkt.payload.decode(errors="replace") or "/")
-            chunks = [blob[i : i + CHUNK] for i in range(0, len(blob), CHUNK)] or [b""]
+            size = self._chunk_size(pkt.dst, pkt.src)
+            chunks = [blob[i : i + size] for i in range(0, len(blob), size)] or [b""]
             with self._lock:
                 self._responses[key] = (chunks, time.time())
                 while len(self._responses) > 50:
@@ -297,6 +303,14 @@ class Node:
         except ValueError:
             return
         self._send_chunks(pkt, chunks, [s for s in wanted if 0 <= s < len(chunks)], pkt.round)
+
+    def _chunk_size(self, src: str, dst: str) -> int:
+        """Biggest chunk that still fits in one radio frame (LoRa: 255 bytes)."""
+        max_frame = getattr(self.transport, "max_frame", None)
+        if not max_frame:
+            return CHUNK
+        overhead = Packet(PacketType.DATA, src, dst).encode()
+        return max(32, min(CHUNK, max_frame - len(overhead)))
 
     def _send_chunks(self, req: Packet, chunks: list[bytes], seqs, rnd: int) -> None:
         ttl = max(self.ttl, req.hops + 1)
@@ -329,6 +343,8 @@ class Node:
             blob = self._build_response(domain, path)
             return self._decode_page(f"gorb://{domain}{path}", blob, 0, 0.0)
 
+        if len(path.encode()) > self._chunk_size(self.callsign, domain):
+            raise GorbError("address too long to send over the radio")
         msg_id = random.getrandbits(32)
         p = _Pending(domain, path)
         with self._lock:
@@ -361,8 +377,9 @@ class Node:
                     log.info("asking %s to resend %d chunk(s)", domain, len(missing))
                     # Keep each RESEND packet small; ask for the first batch.
                     payload = ""
+                    limit = self._chunk_size(self.callsign, domain)
                     for s in missing:
-                        if len(payload) + len(s) + 1 > CHUNK:
+                        if len(payload) + len(s) + 1 > limit:
                             break
                         payload += s + ","
                     self._send(Packet(PacketType.RESEND, self.callsign, domain, payload.encode(),
