@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gorb"
+version = "0.1.0b0"
+description = "G.O.R.B - Global Open Radio Browser: send and receive web pages over radio"
+readme = "readme.md"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+radio = ["sounddevice", "pyserial"]
+small = ["pyserial"]
+
+[project.scripts]
+gorb = "gorb.cli:main"
+
+[tool.setuptools]
+packages = ["gorb"]
