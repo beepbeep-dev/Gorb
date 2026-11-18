@@ -2,9 +2,34 @@
 
 This firmware turns a cheap ESP32 LoRa board into a G.O.R.B Small radio.
 
-* **Plugged into a computer (USB)**: it's the radio for `gorb browse/host/get --small ...`.
-* **On its own (battery or phone charger)**: it relays G.O.R.B Small packets for
-  everyone nearby (rule 2). Put one on a windowsill or a roof and it extends the network.
+**One board does everything. No computer and no second board are needed.**
+
+* **Browser**: the board opens its own Wi-Fi hotspot. Join it with your phone
+  and browse G.O.R.B. Pages travel over LoRa; the Wi-Fi only connects your
+  phone to the board, and there is no internet on it.
+* **Host**: type your pages into the board's "My site" editor. They're stored
+  on the board and served to anyone who asks for your `.gorb` domain.
+* **Relay**: it always repeats G.O.R.B Small packets for everyone nearby (rule 2),
+  even with nobody connected. Put one on a windowsill or a roof to extend the network.
+* **Radio for a computer** (optional): plugged in over USB it's the radio for
+  `gorb browse/host/get --small ...`.
+
+To browse you only need your one board, plus somebody in range (directly or
+through relays) who hosts a site. You can always open your own site on your
+own board.
+
+## First start (phone only)
+
+1. Flash the board (below), attach the antenna, power it from USB or a battery.
+2. On your phone, join the Wi-Fi network **GORB-xxxx**. The password is **gorbradio**.
+3. Open **http://192.168.4.1** (many phones open it automatically).
+4. Go to **Settings**: choose your region, give your station a name, and set a
+   new hotspot password. Without a region the board never transmits.
+5. Optional: go to **My site**, pick a domain like `cats.gorb`, and write `index.html`.
+6. Type a gorb:// address in the bar and tap **Tune in**.
+
+Speeds: a 1 KB page takes a few seconds; pages hosted on a board are sent
+uncompressed and capped at 32 KB.
 
 ## Boards
 
@@ -38,7 +63,7 @@ Replace `heltec_v3` with your board's env. Arduino IDE also works: rename
 `src/main.cpp` to `gorb-small.ino`, install the RadioLib library, and edit the
 board pins at the top of the file.
 
-## Use it
+## Use it with a computer (optional)
 
 ```bash
 gorb regions
@@ -71,6 +96,8 @@ On Windows the device is something like `COM3`; on a Mac, `/dev/cu.usbserial-...
   LoRaWAN or Meshtastic networks (rule 5).
 * It relays each packet at most once, and skips the relay if two other
   stations already repeated it.
+* It won't save, host or show pages that break rule 1. Pages are shown with
+  scripts switched off.
 
 The legal limits are measured at the antenna (ERP/EIRP). A high-gain antenna
 can push you over, so stick to the small antenna that came with the board

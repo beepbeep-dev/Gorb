@@ -107,8 +107,9 @@ power and airtime limits.
 * About 6 to 12 kbit/s, much faster than ham G.O.R.B at 1200 baud. A small
   page loads in a few seconds.
 * Range is from hundreds of metres in a city to several km with line of sight.
-* Plug the board into your computer to browse or host, or leave it running on
-  its own as a battery relay to grow the network (rule 2).
+* **One board is enough.** It makes its own Wi-Fi hotspot, so you browse
+  and host from your phone with no computer. It also relays for others (rule 2),
+  and can be the radio for a computer over USB.
 * G.O.R.B Small and ham G.O.R.B are separate networks that can't hear each other.
 
 ```bash

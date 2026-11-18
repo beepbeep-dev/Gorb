@@ -356,7 +356,9 @@ class Node:
                               ttl=self.ttl))
             while True:
                 # Wait while chunks keep trickling in.
-                idle_limit = 2.5 + chunk_air * (4 + 2 * self.ttl)
+                # Hosts on duty-cycle limited bands may pause between chunks.
+                duty = getattr(self.transport, "max_duty", 1.0)
+                idle_limit = 2.5 + chunk_air * (4 + 2 * self.ttl) + 4 * chunk_air / duty
                 while not p.event.is_set():
                     p.event.wait(0.1)
                     if time.monotonic() - p.last_activity > idle_limit:
