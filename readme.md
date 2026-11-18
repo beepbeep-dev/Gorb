@@ -15,3 +15,131 @@ failure to follow these rules will make it so you can’t use gorb
 
 Ai use:
 we use ai as I’m too lazy to sit down for 12 hours learn radio frequencies and how they work and all that 
+
+
+---
+
+# Using G.O.R.B (v0.1 beta)
+
+G.O.R.B sends web pages as **sound**. A page is compressed, split into small
+packets, and each packet is turned into 1200 Hz / 2200 Hz tones (the same
+"AFSK 1200" sound that old-school packet radio and APRS use). Any radio that
+can transmit audio can carry it, and any radio that can hear it can turn it
+back into a page.
+
+```
+your browser ──GET──▶ tones ──▶ radio ~~~~~ radio ──▶ relay ~~~~~ radio ──▶ host
+             ◀──page chunks── tones ◀── ...  (missing chunks are asked for again)
+```
+
+## Install
+
+```bash
+pip install -e .
+```
+
+For a real radio, add the sound card support:
+
+```bash
+pip install -e ".[radio]"
+```
+
+## Try it with no radio (simulated band)
+
+```bash
+gorb demo
+```
+
+Then open http://127.0.0.1:8088/go?url=gorb%3A%2F%2Fwelcome.gorb.
+The demo puts three pretend stations in a line: a host, a relay and you.
+You are too far from the host to hear it, so every page reaches you through
+the relay (rule 2 in action). Add `--realtime` to feel the real 1200 baud speed.
+
+You can also run each station as its own program. They all share the
+simulated band on your computer:
+
+```bash
+gorb host --callsign HOST-1 --site cats.gorb=./my-cat-site --pos 0,0
+```
+
+```bash
+gorb relay --callsign RELAY-1 --pos 8,0
+```
+
+```bash
+gorb browse --callsign ME-1 --pos 16,0
+```
+
+## Use a real radio
+
+Wire the computer's sound card **output → radio mic input** and the radio's
+**speaker → sound card input** (a USB radio interface like a Digirig or
+SignaLink makes this easy). Then add `--radio`:
+
+```bash
+gorb --list-devices
+```
+
+```bash
+gorb browse --radio --callsign YOURCALL --input-device 1 --output-device 1
+```
+
+```bash
+gorb host --radio --callsign YOURCALL --site mysite.gorb=./site --ptt /dev/ttyUSB0
+```
+
+The transmitter is keyed by the radio's VOX, or by `--ptt PORT` (RTS/DTR on a
+serial port, as most USB interfaces expect).
+
+**Be legal.** On amateur (ham) bands you need a license, your `--callsign` must
+be your real callsign, and you must ID your station (G.O.R.B beacons your
+callsign every 10 minutes by default). Ham rules also forbid encryption, so
+G.O.R.B pages are never encrypted. Licence-free radios (FRS/PMR446 etc.) often
+don't allow data at all. Check the rules where you live.
+
+## Commands
+
+| command | what it does |
+|---|---|
+| `gorb browse` | browser window at http://127.0.0.1:8088 |
+| `gorb host --site DOMAIN=FOLDER` | host a site (domains end in `.gorb`) |
+| `gorb relay` | only relay signals for others |
+| `gorb get gorb://site.gorb/page.html` | print a page in the terminal |
+| `gorb encode page.html out.wav` | turn a page into a sound file you can play into any radio |
+| `gorb decode in.wav` | turn a recording (e.g. from an SDR) back into the page |
+| `gorb demo` | host + relay + browser on the simulated band |
+| `gorb --rules` | print the rules |
+
+## How the rules are built in
+
+1. **No NSFW/violent/adult content**: hosts refuse to send pages that trip the
+   content filter and browsers refuse to show them (`gorb/rules.py`). This is a
+   simple word filter, not real moderation.
+2. **Everyone helps**: every station relays packets it hears that aren't for it
+   (up to `--ttl` hops). It waits a random moment first and stays quiet if other
+   relays already repeated the packet.
+3. **Golden rule**: stations listen before talking, back off while someone else
+   transmits, and can't use more than half the airtime.
+4. **Vibecoded sites welcome**: anything that is HTML works.
+5. **No jammers**: G.O.R.B only ever transmits real packets.
+
+## Limits (it's a beta)
+
+* Slow: about 100 bytes per second at 1200 baud. Keep pages small; the
+  max is 64 KB after compression. Images only work as tiny `data:` URIs.
+* Pages are shown with scripts turned off and no internet access.
+* Links to other `gorb://` sites and relative links work; `http(s)` links open
+  on the normal web.
+
+## Code map
+
+| file | job |
+|---|---|
+| `gorb/modem.py` | bytes ⇄ audio tones (AFSK modem, sync, CRC) |
+| `gorb/packet.py` | the packet format |
+| `gorb/transport.py` | real radio via sound card, or the simulated band |
+| `gorb/node.py` | hosting, fetching, chunking, retries, relaying |
+| `gorb/browser.py` | the browser window |
+| `gorb/rules.py` | the rules and the content filter |
+
+Tests: `python -m unittest discover tests`
