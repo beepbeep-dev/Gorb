@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from .transport import Transport
 
 LORA_SYNC_WORD = 0x47  # 'G'; keeps G.O.R.B Small separate from LoRaWAN/Meshtastic
-LORA_MAX_FRAME = 255  # biggest LoRa packet
+LORA_MAX_FRAME = 250  # LoRa takes 255, but 250 also fits ESP-NOW when a board bridges
 
 
 @dataclass(frozen=True)

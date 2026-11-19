@@ -4,7 +4,9 @@
     version  1
     type     1  see PacketType
     ttl      1  how many more relays may repeat this packet
-    hops     1  how many relays already repeated it
+    hops     1  how many relays already repeated it (low 7 bits); top bit = "narrow":
+                the requester is behind a small-packet radio (LoRa, ESP-NOW), so
+                reply in small pieces that can cross it
     round    1  retry counter, so a retransmission isn't dropped as a duplicate
     msg_id   4  ties a request to its response
     seq      2  chunk number
@@ -46,13 +48,15 @@ class Packet:
     ttl: int = 3
     hops: int = 0
     round: int = 0
+    narrow: bool = False
 
     def encode(self) -> bytes:
         src = self.src.encode()[:255]
         dst = self.dst.encode()[:255]
         return (
             _HEAD.pack(
-                MAGIC, VERSION, int(self.type), self.ttl, self.hops, self.round,
+                MAGIC, VERSION, int(self.type), self.ttl,
+                (self.hops & 0x7F) | (0x80 if self.narrow else 0), self.round,
                 self.msg_id, self.seq, self.total,
             )
             + bytes([len(src)]) + src
@@ -74,7 +78,8 @@ class Packet:
         n = data[i]
         dst = data[i + 1 : i + 1 + n].decode(errors="replace")
         i += 1 + n
-        return cls(PacketType(ptype), src, dst, data[i:], msg_id, seq, total, ttl, hops, rnd)
+        return cls(PacketType(ptype), src, dst, data[i:], msg_id, seq, total, ttl, hops & 0x7F, rnd,
+                   bool(hops & 0x80))
 
     @property
     def key(self) -> tuple:

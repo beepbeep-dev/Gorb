@@ -61,6 +61,14 @@ class FirmwareCoreTest(unittest.TestCase):
         code, out = self.run_exe("packet", data=p.encode())
         self.assertEqual(Packet.decode(out), p)
 
+    def test_narrow_flag_roundtrip(self):
+        p = Packet(PacketType.GET, "ME-1", "cats.gorb", b"/", 5, ttl=3, hops=2, narrow=True)
+        code, out = self.run_exe("packet", data=p.encode())
+        q = Packet.decode(out)
+        self.assertEqual(q, p)
+        self.assertTrue(q.narrow)
+        self.assertEqual(q.hops, 2)
+
     def test_filter_matches_python(self):
         for text in ["My cat blog", "NSFW pics", "for adults only!", "gorgeous", "18+ club",
                      "a118+b", "gore", "Gory", "nothing here"]:

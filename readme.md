@@ -140,6 +140,39 @@ gorb browse --small EU868 --device /dev/ttyUSB0 --callsign my-station
 Flashing, supported boards and wiring: see [firmware/gorb-small](firmware/gorb-small/README.md).
 These presets are a starting point, not legal advice. Check your country's rules.
 
+# Gorb Wi-Fi (no ISP, no internet, no extra hardware)
+
+Wi-Fi is radio too, and you don't need an ISP to use it. The ISP only connects
+a network to the internet. Gorb Wi-Fi stations talk directly over Wi-Fi:
+
+* **Computers** on the same Wi-Fi run `--wifi`. The network can be a router
+  with its internet cable unplugged, a laptop's or phone's hotspot (no mobile
+  data needed), or a G.O.R.B board's hotspot.
+* **ESP32 boards** talk straight to each other with ESP-NOW: no router at all,
+  and **no LoRa module needed**. A plain ESP32 is a complete Gorb Wi-Fi station.
+* **A board with a LoRa module bridges everything**: Gorb Wi-Fi laptops on its
+  hotspot, ESP32s nearby over ESP-NOW, and G.O.R.B Small over LoRa all become
+  one network.
+
+| | Gorb Wi-Fi | G.O.R.B Small (LoRa) |
+|---|---|---|
+| speed | very fast: HD pictures and videos in about a second | ~1 KB/s |
+| range | ~50-100 m (km with directional antennas) | ~1-10 km |
+| hardware | what you already have | ESP32 + LoRa module |
+
+Run these on two computers on the same Wi-Fi, one hosting and one browsing:
+
+```bash
+gorb host --wifi --callsign HOST-1 --site mysite.gorb=./my-folder
+```
+
+```bash
+gorb browse --wifi --callsign ME-1 --share
+```
+
+`--share` lets phones on the same Wi-Fi (including iPhones, which can't run
+Gorb themselves) browse through that computer at `http://<computer's IP>:8088`.
+
 # Pictures and video: Gorb Pixels 2, Gorb Motion 2 and Gorb Echo
 
 Radio is slow, so G.O.R.B never sends the original file. How it sends pictures
@@ -222,6 +255,7 @@ automatically, so hosts are responsible for what they post.
 | `gorb/browser.py` | the browser window |
 | `gorb/rules.py` | the rules and the content filter |
 | `gorb/small.py` | G.O.R.B Small: regions and the ESP32 serial link |
+| `gorb/wifi.py` | Gorb Wi-Fi |
 | `gorb/media.py` | Gorb Pixels 2 and Gorb Motion 2 encoders |
 | `gorb/branding.py`, `assets/` | the logo |
 | `lab/` | the Gorb Lab simulations behind the media formats |

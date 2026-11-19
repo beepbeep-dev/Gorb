@@ -112,10 +112,12 @@ class NetworkTest(unittest.TestCase):
         self.assertEqual(self.me.fetch("gorb://test.gorb/bad.html", timeout=60).status, 451)
 
     def test_beacon_directory(self):
-        self.host.beacon()
+        # Beacons cross two lossy hops (10% loss each), and like real stations
+        # we send another if nobody heard the last one.
         deadline = time.time() + 10
         while "test.gorb" not in self.me.known_domains() and time.time() < deadline:
-            time.sleep(0.1)
+            self.host.beacon()
+            time.sleep(0.5)
         self.assertEqual(self.me.known_domains()["test.gorb"].callsign, "HOST-1")
 
 

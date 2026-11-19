@@ -40,6 +40,9 @@
 #include <SPI.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
 
 #include "gorb_core.h"
 #include "web_pages.h"
@@ -112,7 +115,27 @@ Preferences prefs;
 static const Region *region = nullptr;
 static int8_t powerDbm = 14;
 static bool relayOn = true;
-static bool radioOk = false;
+static bool radioOk = false;  // LoRa chip found and running
+
+// Gorb Wi-Fi: besides LoRa, the board talks over two Wi-Fi paths and passes
+// packets between all of them:
+//   ESP-NOW  - straight to other G.O.R.B ESP32s nearby, no router needed
+//   hotspot  - laptops/phones joined to this board's Wi-Fi running Gorb Wi-Fi
+enum Medium : uint8_t { MED_LORA = 1, MED_ESPNOW = 2, MED_LAN = 4 };
+#define GORB_WIFI_CHANNEL 6  // every G.O.R.B board uses this channel so ESP-NOW reaches all
+#define GORB_WIFI_PORT 47200
+static bool espnowOn = true;  // setting
+static bool espnowOk = false;
+static WiFiUDP lan;
+static bool lanOk = false;
+static uint8_t lanId[8];
+static uint32_t statNow = 0, statLan = 0;
+
+static bool lanHasClients() { return lanOk && WiFi.softAPgetStationNum() > 0; }
+static uint8_t mediumsAvailable() {
+  return (radioOk ? MED_LORA : 0) | (espnowOk ? MED_ESPNOW : 0) | (lanHasClients() ? MED_LAN : 0);
+}
+static bool anyRadio() { return radioOk || espnowOk || lanHasClients(); }
 static std::string stationName;  // upper case, like the PC software
 static std::string myDomain;     // e.g. "cats.gorb", empty = not hosting
 static String wifiPass = DEFAULT_WIFI_PASS;
@@ -187,6 +210,7 @@ struct TxItem {
   bool used;
   bool fromPc;
   bool isRelay;
+  uint8_t pending;  // mediums still to send on
   uint32_t hash;
   uint32_t notBefore;
   uint8_t len;
@@ -203,13 +227,16 @@ static int txqFree() {
 }
 
 static bool enqueue(const uint8_t *data, size_t len, bool fromPc, bool isRelay, uint32_t hash,
-                    uint32_t delayMs) {
+                    uint32_t delayMs, uint8_t mediums) {
   if (len > 255) return false;
+  if (len > gorb::MAX_FRAME) mediums &= ~MED_ESPNOW;  // ESP-NOW tops out at 250
+  if (!mediums) return false;
   for (auto &t : txq)
     if (!t.used) {
       t.used = true;
       t.fromPc = fromPc;
       t.isRelay = isRelay;
+      t.pending = mediums;
       t.hash = hash;
       t.notBefore = millis() + delayMs;
       t.len = len;
@@ -221,15 +248,15 @@ static bool enqueue(const uint8_t *data, size_t len, bool fromPc, bool isRelay, 
 
 // Queue a packet made by the board's own station.
 static bool sendOwn(const gorb::Packet &pk) {
-  if (!radioOk) return false;
+  if (!anyRadio()) return false;
   auto bytes = pk.encode();
   if (bytes.size() > gorb::MAX_FRAME) return false;
   uint32_t h = packetHash(bytes.data(), bytes.size());
   markSeen(h);
-  return enqueue(bytes.data(), bytes.size(), false, false, h, 0);
+  return enqueue(bytes.data(), bytes.size(), false, false, h, 0, mediumsAvailable());
 }
 
-static float airtimeSec(size_t len) { return radioOk ? radio.getTimeOnAir(len) / 1e6f : 0.5f; }
+static float airtimeSec(size_t len) { return radioOk ? radio.getTimeOnAir(len) / 1e6f : 0.01f; }
 
 // ---- KISS serial -----------------------------------------------------------
 static const uint8_t FEND = 0xC0, FESC = 0xDB, TFEND = 0xDC, TFESC = 0xDD;
@@ -273,7 +300,11 @@ static void sendHello() {
   j += myDomain.c_str();
   j += "\",\"wifi\":\"";
   j += hotspotName().c_str();
-  j += "\",\"air_budget_s\":";
+  j += "\",\"espnow\":";
+  j += espnowOk ? "true" : "false";
+  j += ",\"wifi_clients\":";
+  j += WiFi.softAPgetStationNum();
+  j += ",\"air_budget_s\":";
   j += String(airBudget, 1);
   j += "}";
   kissSend(0x03, (const uint8_t *)j.c_str(), j.length());
@@ -321,6 +352,7 @@ static void loadConfig() {
   region = findRegion(prefs.getUChar("region", 0));
   powerDbm = prefs.getChar("power", 14);
   relayOn = prefs.getBool("relay", true);
+  espnowOn = prefs.getBool("espnow", true);
   stationName = prefs.getString("name", "").c_str();
   myDomain = prefs.getString("domain", "").c_str();
   wifiPass = prefs.getString("wifipass", DEFAULT_WIFI_PASS);
@@ -340,6 +372,7 @@ static void saveConfig() {
   prefs.putUChar("region", region ? region->id : 0);
   prefs.putChar("power", powerDbm);
   prefs.putBool("relay", relayOn);
+  prefs.putBool("espnow", espnowOn);
   prefs.putString("name", stationName.c_str());
   prefs.putString("domain", myDomain.c_str());
   prefs.putString("wifipass", wifiPass);
@@ -710,6 +743,7 @@ static void finishPage(const std::string &url, int status, std::string ctype, st
 static void sendGet() {
   gorb::Packet pk;
   pk.type = gorb::GET;
+  pk.narrow = true;  // everything the board sends must fit ESP-NOW/LoRa
   pk.src = stationName;
   pk.dst = fetchState.domain;
   pk.msgId = fetchState.msgId;
@@ -734,9 +768,9 @@ static void startFetch(const std::string &url, const std::string &domain, const 
   fetchState.msgId = esp_random();
   fetchState.started = fetchState.lastAct = millis();
   lastErrorUrl.clear();
-  if (!radioOk) {
-    fetchFail(region ? "the radio did not start - check the board and antenna"
-                     : "choose your region in Settings first");
+  if (!anyRadio()) {
+    fetchFail(region ? "no radio is working - check the LoRa module and antenna, or turn on Gorb Wi-Fi"
+                     : "no radio: choose your region in Settings (LoRa) or turn on Gorb Wi-Fi");
     return;
   }
   sendGet();
@@ -806,7 +840,7 @@ static void serviceFetch() {
   // How long to wait for the next chunk: the host may be pausing to keep
   // within its duty cycle, and relays add delay.
   float air = airtimeSec(255);
-  uint32_t idle = 3000 + (uint32_t)(1000 * 4 * air / (region ? region->duty : 0.5f));
+  uint32_t idle = 3000 + (radioOk ? (uint32_t)(1000 * 4 * air / (region ? region->duty : 0.5f)) : 0);
   if (now - fetchState.lastAct < idle) return;
   fetchState.round++;
   fetchState.lastAct = now;
@@ -863,35 +897,32 @@ static void serviceMedia() {
 // ==========================================================================
 // Radio receive + relay
 // ==========================================================================
-static void handleRadioPacket() {
-  rxFlag = false;
-  uint8_t buf[256];
-  size_t len = radio.getPacketLength();
-  if (len == 0 || len > 255) {
-    radio.startReceive();
-    return;
-  }
-  int st = radio.readData(buf, len);
-  int16_t rssi = (int16_t)radio.getRSSI();
-  int8_t snr4 = (int8_t)(radio.getSNR() * 4);
-  radio.startReceive();
-  gorb::Packet pk;
-  if (st != RADIOLIB_ERR_NONE || !pk.decode(buf, len)) return;
+// Everything heard on any radio (LoRa, ESP-NOW, the hotspot) comes through
+// here. The board's own station handles it, a connected computer gets a
+// copy, and it is relayed onto the radios (rule 2), which also bridges
+// Gorb Wi-Fi, ESP-NOW and LoRa together.
+static uint8_t kissOut[1500 + 3];
 
+static void handleIncoming(uint8_t *buf, size_t len, uint8_t medium, int16_t rssi, int8_t snr4) {
+  gorb::Packet pk;
+  if (!pk.decode(buf, len)) return;
   uint32_t h = packetHash(buf, len);
   if (markSeen(h) > 1) return;  // heard before (another relay repeated it)
   statRx++;
-  lastRssi = rssi;
+  if (medium == MED_LORA) lastRssi = rssi;
+  if (medium == MED_ESPNOW) statNow++;
+  if (medium == MED_LAN) statLan++;
 
 #ifdef LED_PIN
   digitalWrite(LED_PIN, HIGH);
 #endif
-  uint8_t out[259];
-  out[0] = rssi >> 8;
-  out[1] = rssi & 0xFF;
-  out[2] = (uint8_t)snr4;
-  memcpy(out + 3, buf, len);
-  kissSend(0x01, out, len + 3);  // let a connected computer see it too
+  if (len <= 1500) {
+    kissOut[0] = rssi >> 8;
+    kissOut[1] = rssi & 0xFF;
+    kissOut[2] = (uint8_t)snr4;
+    memcpy(kissOut + 3, buf, len);
+    kissSend(0x01, kissOut, len + 3);  // let a connected computer see it too
+  }
 
   // The board's own station.
   if (pk.type == gorb::BEACON) {
@@ -904,51 +935,171 @@ static void handleRadioPacket() {
     fetchReceive(pk);
   }
 
-  // Rule 2: repeat it for stations that can't hear the sender.
-  if (relayOn && pk.ttl > 0 && !isLocalName(pk.src) && !isLocalName(pk.dst)) {
+  // Rule 2: repeat it for stations that can't hear the sender. Everyone on
+  // the hotspot already heard a hotspot packet, so those only go to radio.
+  if (relayOn && pk.ttl > 0 && !isLocalName(pk.src) && !isLocalName(pk.dst) && len <= 255) {
+    uint8_t to = mediumsAvailable();
+    if (medium == MED_LAN) to &= ~MED_LAN;
     buf[4] = pk.ttl - 1;
-    buf[5] = pk.hops + 1;
-    uint32_t air = radio.getTimeOnAir(len) / 1000;
-    if (enqueue(buf, len, false, true, h, random(50, 400) + air / 2)) statRelayed++;
+    buf[5] = (buf[5] & 0x80) | ((pk.hops + 1) & 0x7F);  // keep the "narrow" bit
+    uint32_t wait = random(50, 400);
+    if (radioOk) wait += radio.getTimeOnAir(len) / 2000;
+    if (to && enqueue(buf, len, false, true, h, wait, to)) statRelayed++;
   }
 #ifdef LED_PIN
   digitalWrite(LED_PIN, LOW);
 #endif
 }
 
-static uint32_t nextTryAt = 0;
+static void handleLoraPacket() {
+  rxFlag = false;
+  uint8_t buf[256];
+  size_t len = radio.getPacketLength();
+  if (len == 0 || len > 255) {
+    radio.startReceive();
+    return;
+  }
+  int st = radio.readData(buf, len);
+  int16_t rssi = (int16_t)radio.getRSSI();
+  int8_t snr4 = (int8_t)(radio.getSNR() * 4);
+  radio.startReceive();
+  if (st == RADIOLIB_ERR_NONE) handleIncoming(buf, len, MED_LORA, rssi, snr4);
+}
+
+// ---- ESP-NOW (runs in the Wi-Fi task: just copy, handle later in loop) ----
+static const uint8_t BCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+struct NowSlot {
+  volatile bool full;
+  uint8_t len;
+  int8_t rssi;
+  uint8_t data[250];
+};
+static NowSlot nowRx[8];
+
+static void nowStore(const uint8_t *data, int len, int rssi) {
+  if (len < 17 || len > 250 || data[0] != 'G' || data[1] != 'B') return;
+  for (auto &slot : nowRx)
+    if (!slot.full) {
+      memcpy(slot.data, data, len);
+      slot.len = len;
+      slot.rssi = rssi;
+      slot.full = true;
+      return;
+    }
+}
+
+#if ESP_IDF_VERSION_MAJOR >= 5
+static void onNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  nowStore(data, len, info && info->rx_ctrl ? info->rx_ctrl->rssi : 0);
+}
+#else
+static void onNowRecv(const uint8_t *mac, const uint8_t *data, int len) { nowStore(data, len, 0); }
+#endif
+
+static void startEspNow() {
+  espnowOk = false;
+  if (!espnowOn) return;
+  esp_now_deinit();
+  if (esp_now_init() != ESP_OK) {
+    sendLog("ESP-NOW failed to start");
+    return;
+  }
+  esp_now_register_recv_cb(onNowRecv);
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, BCAST, 6);
+  peer.channel = 0;  // whatever channel the hotspot is on
+  peer.ifidx = WIFI_IF_AP;
+  peer.encrypt = false;
+  if (esp_now_add_peer(&peer) != ESP_OK) {
+    sendLog("ESP-NOW peer failed");
+    return;
+  }
+  espnowOk = true;
+}
+
+static void pollEspNow() {
+  for (auto &slot : nowRx)
+    if (slot.full) {
+      uint8_t buf[256];
+      size_t len = slot.len;
+      memcpy(buf, slot.data, len);
+      int8_t rssi = slot.rssi;
+      slot.full = false;
+      handleIncoming(buf, len, MED_ESPNOW, rssi, 0);
+    }
+}
+
+// ---- Gorb Wi-Fi on the hotspot: same wire format as gorb/wifi.py --------
+static uint8_t lanBuf[1500];
+
+static void pollLan() {
+  if (!lanOk) return;
+  int n = lan.parsePacket();
+  if (n <= 0) return;
+  n = lan.read(lanBuf, sizeof(lanBuf));
+  if (n < 12 + 17 || memcmp(lanBuf, "GWIF", 4) != 0 || memcmp(lanBuf + 4, lanId, 8) == 0) return;
+  handleIncoming(lanBuf + 12, n - 12, MED_LAN, 0, 0);
+}
+
+static void lanSend(const uint8_t *data, size_t len) {
+  if (!lanHasClients()) return;
+  lan.beginPacket(IPAddress(192, 168, 4, 255), GORB_WIFI_PORT);
+  lan.write((const uint8_t *)"GWIF", 4);
+  lan.write(lanId, 8);
+  lan.write(data, len);
+  lan.endPacket();
+}
+
+// ---- sending -----------------------------------------------------------
+static uint32_t nextLoraTry = 0;
+
+static void finishTx(TxItem &t, uint8_t status) {
+  if (t.fromPc) sendTxDone(status);
+  t.used = false;
+}
 
 static void serviceTxQueue() {
-  if (!radioOk || millis() < nextTryAt) return;
+  uint32_t now = millis();
+  // Wi-Fi paths are fast: send everything that's due right away.
+  for (auto &t : txq) {
+    if (!t.used || (int32_t)(now - t.notBefore) < 0) continue;
+    if (t.isRelay && seenCount(t.hash) > 2) {  // two others already repeated it
+      t.used = false;
+      continue;
+    }
+    if (t.pending & MED_ESPNOW) {
+      if (espnowOk && t.len <= 250) esp_now_send(BCAST, t.data, t.len);
+      t.pending &= ~MED_ESPNOW;
+    }
+    if (t.pending & MED_LAN) {
+      lanSend(t.data, t.len);
+      t.pending &= ~MED_LAN;
+    }
+    if ((t.pending & MED_LORA) && !radioOk) t.pending &= ~MED_LORA;
+    if (!t.pending) finishTx(t, 0);
+  }
+
+  // LoRa: one packet at a time, within the duty cycle, listening first.
+  if (!radioOk || millis() < nextLoraTry) return;
   TxItem *t = nullptr;
   for (auto &q : txq)
-    if (q.used && (int32_t)(millis() - q.notBefore) >= 0) {
+    if (q.used && (q.pending & MED_LORA) && (int32_t)(now - q.notBefore) >= 0) {
       t = &q;
       break;
     }
   if (!t) return;
-
-  // A relay is pointless if two other stations already repeated it.
-  if (t->isRelay && seenCount(t->hash) > 2) {
-    t->used = false;
-    return;
-  }
-
   float air = radio.getTimeOnAir(t->len) / 1e6f;
   refillBudget();
   if (airBudget < air) {  // duty cycle used up; wait for it to refill
-    nextTryAt = millis() + 250;
+    nextLoraTry = millis() + 250;
     return;
   }
-
-  // Rule 3: listen before talking.
-  int cad = radio.scanChannel();
+  int cad = radio.scanChannel();  // rule 3: listen before talking
   if (cad == RADIOLIB_LORA_DETECTED) {
     radio.startReceive();
-    nextTryAt = millis() + random(100, 600);
+    nextLoraTry = millis() + random(100, 600);
     return;
   }
-
 #ifdef LED_PIN
   digitalWrite(LED_PIN, HIGH);
 #endif
@@ -959,8 +1110,8 @@ static void serviceTxQueue() {
   airBudget -= air;
   rxFlag = false;  // the IRQ fired for our own transmission
   radio.startReceive();
-  if (t->fromPc) sendTxDone(st == RADIOLIB_ERR_NONE ? 0 : 2);
-  t->used = false;
+  t->pending &= ~MED_LORA;
+  if (!t->pending) finishTx(*t, st == RADIOLIB_ERR_NONE ? 0 : 2);
 }
 
 // ==========================================================================
@@ -973,7 +1124,7 @@ static bool kesc = false, kin = false;
 static void handleCommand(uint8_t cmd, const uint8_t *d, size_t n) {
   switch (cmd) {
     case 0x00: {  // TX
-      if (!region || !radioOk) {
+      if (!anyRadio()) {
         sendTxDone(3);
         return;
       }
@@ -983,7 +1134,7 @@ static void handleCommand(uint8_t cmd, const uint8_t *d, size_t n) {
       }
       uint32_t h = packetHash(d, n);
       markSeen(h);  // so we ignore relayed copies of our own packet
-      if (!enqueue(d, n, true, false, h, 0)) sendTxDone(2);
+      if (!enqueue(d, n, true, false, h, 0, mediumsAvailable())) sendTxDone(2);
       break;
     }
     case 0x10: {  // CONFIG
@@ -1118,7 +1269,11 @@ static void handleHome() {
   if (!any && myDomain.empty())
     b += "<li class=\"meta\">Nothing heard yet. Stations announce themselves every 10 minutes.</li>";
   b += "</ul><p><a href=\"/site\">My site</a> &middot; <a href=\"/settings\">Settings</a></p>";
-  b += "<p class=\"meta\">heard " + std::to_string(statRx) + " packets &middot; relayed " +
+  b += "<p class=\"meta\">radios: " + std::string(radioOk ? "LoRa " : "") +
+       (espnowOk ? "Gorb Wi-Fi " : "") +
+       (WiFi.softAPgetStationNum() ? std::to_string(WiFi.softAPgetStationNum()) + " device(s) on this hotspot"
+                                   : std::string(anyRadio() ? "" : "none yet (see Settings)")) +
+       "<br>heard " + std::to_string(statRx) + " packets &middot; relayed " +
        std::to_string(statRelayed) + " &middot; served " + std::to_string(statServed) +
        " pages" + (statRx ? " &middot; last signal " + std::to_string(lastRssi) + " dBm" : "") +
        "</p>";
@@ -1283,6 +1438,11 @@ static void handleSettings() {
       region = r;
       powerDbm = r ? clampPower(r, server.arg("power").toInt()) : 14;
       relayOn = server.hasArg("relay");
+      bool nowWanted = server.hasArg("espnow");
+      if (nowWanted != espnowOn) {
+        espnowOn = nowWanted;
+        restartWifi = true;  // ESP-NOW starts/stops with the hotspot
+      }
       if (pass.length() && pass != wifiPass) {
         wifiPass = pass;
         restartWifi = true;
@@ -1317,10 +1477,14 @@ static void handleSettings() {
        std::to_string(powerDbm) +
        "\"><label><input type=\"checkbox\" name=\"relay\"" + (relayOn ? " checked" : "") +
        "> Relay for others (rule 2, please leave on)</label>"
+       "<label><input type=\"checkbox\" name=\"espnow\"" + std::string(espnowOn ? " checked" : "") +
+       "> Gorb Wi-Fi: talk straight to G.O.R.B boards nearby over Wi-Fi (ESP-NOW, no router, "
+       "no license, works without a LoRa module)</label>"
        "<label>Hotspot password (leave empty to keep it)</label><input name=\"wifipass\" "
        "type=\"password\" minlength=\"8\"><p><button>Save</button></p></form>"
        "<p class=\"meta\">Firmware " FW_VERSION " &middot; " +
-       std::string(CHIP) + " &middot; radio " + (radioOk ? "on" : "off") +
+       std::string(CHIP) + " &middot; LoRa " + (radioOk ? "on" : "off (no module or no region)") +
+       " &middot; Gorb Wi-Fi " + (espnowOk ? "on" : "off") +
        "</p><div class=\"note\">Use the antenna that came with the board. A high-gain "
        "antenna can push you over the legal limit.</div></div>";
   sendHtml(200, b);
@@ -1478,8 +1642,11 @@ static void startWifi() {
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
                     IPAddress(255, 255, 255, 0));
-  WiFi.softAP(hotspotName().c_str(), wifiPass.c_str());
+  WiFi.softAP(hotspotName().c_str(), wifiPass.c_str(), GORB_WIFI_CHANNEL);
   dns.start(53, "*", IPAddress(192, 168, 4, 1));
+  startEspNow();
+  lan.stop();
+  lanOk = lan.begin(GORB_WIFI_PORT);
 }
 
 // ---- main ------------------------------------------------------------------
@@ -1490,6 +1657,7 @@ void setup() {
 #endif
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
   randomSeed(esp_random());
+  esp_fill_random(lanId, sizeof(lanId));
   loadConfig();
   LittleFS.begin(true);
   if (!LittleFS.exists("/site")) LittleFS.mkdir("/site");
@@ -1518,11 +1686,13 @@ void loop() {
   readSerial();
   dns.processNextRequest();
   server.handleClient();
-  if (rxFlag) handleRadioPacket();
+  if (rxFlag) handleLoraPacket();
+  pollEspNow();
+  pollLan();
   serviceFetch();
   serviceMedia();
   serviceHost();
-  if (radioOk && (beaconSoon || millis() - lastBeacon > BEACON_MS)) sendBeacon();
+  if (anyRadio() && (beaconSoon || millis() - lastBeacon > BEACON_MS)) sendBeacon();
   serviceTxQueue();
   if (restartWifi && millis() > restartWifiAt) {
     restartWifi = false;

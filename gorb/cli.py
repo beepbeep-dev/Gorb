@@ -38,6 +38,10 @@ def _add_radio_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--small", metavar="REGION",
                    help="G.O.R.B Small: license-free LoRa via an ESP32 (see 'gorb regions')")
     p.add_argument("--device", help="serial port of the ESP32 for --small, e.g. /dev/ttyUSB0 or COM3")
+    p.add_argument("--wifi", action="store_true",
+                   help="Gorb Wi-Fi: use the Wi-Fi network you're on (no internet needed)")
+    p.add_argument("--wifi-broadcast", metavar="ADDR",
+                   help="Gorb Wi-Fi: broadcast address to use (default: worked out automatically)")
     p.add_argument("--power", type=int, help="--small transmit power in dBm (capped to the legal limit)")
     p.add_argument("--input-device", help="sound card input (radio speaker), see --list-devices")
     p.add_argument("--output-device", help="sound card output (radio mic)")
@@ -68,8 +72,11 @@ def _add_radio_args(p: argparse.ArgumentParser) -> None:
 
 
 def _transport(a: argparse.Namespace) -> Transport:
-    if a.small and a.radio:
-        raise SystemExit("pick one: --radio (ham G.O.R.B) or --small (G.O.R.B Small)")
+    if sum(bool(x) for x in (a.small, a.radio, a.wifi)) > 1:
+        raise SystemExit("pick one: --radio (ham), --small (LoRa) or --wifi (Gorb Wi-Fi)")
+    if a.wifi:
+        from .wifi import WifiTransport
+        return WifiTransport(broadcast=a.wifi_broadcast)
     if a.small:
         if not a.device:
             raise SystemExit("--small needs --device (the ESP32's serial port)")
@@ -137,8 +144,14 @@ def cmd_relay(a):
 def cmd_browse(a):
     from .browser import serve_browser
     node = _node(a, _sites(a.site))
-    serve_browser(node, a.host, a.port)
-    print(f"G.O.R.B browser open at http://{a.host}:{a.port}  (station {node.callsign})")
+    host = "0.0.0.0" if a.share else a.host
+    serve_browser(node, host, a.port)
+    print(f"G.O.R.B browser open at http://127.0.0.1:{a.port}  (station {node.callsign})")
+    if a.share:
+        from .wifi import local_broadcasts
+        ips = [b.rsplit(".", 1)[0] + ".x" for b in local_broadcasts()[1:]]
+        print(f"Phones and other computers on this Wi-Fi: http://<this computer's IP>:{a.port}"
+              + (f"  (your network looks like {', '.join(ips)})" if ips else ""))
     _wait_forever(node)
 
 
@@ -302,6 +315,8 @@ def main(argv=None):
     _add_radio_args(s)
     s.add_argument("--site", action="append", help="also host DOMAIN=FOLDER")
     s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--share", action="store_true",
+                   help="let phones on the same Wi-Fi use this browser (e.g. an iPhone)")
     s.add_argument("--port", type=int, default=8088)
     s.set_defaults(fn=cmd_browse)
 

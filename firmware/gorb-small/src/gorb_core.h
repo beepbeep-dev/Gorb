@@ -21,10 +21,14 @@ namespace gorb {
 // ---------------------------------------------------------------- packets
 enum PacketType : uint8_t { BEACON = 1, GET = 2, DATA = 3, RESEND = 4, ERROR_PKT = 5, WAIT = 6 };
 static const size_t HEAD_LEN = 15;
-static const size_t MAX_FRAME = 255;
+// Biggest packet every Gorb radio can carry: LoRa takes 255, ESP-NOW 250.
+static const size_t MAX_FRAME = 250;
 
 struct Packet {
   uint8_t type = 0, ttl = 3, hops = 0, round = 0;
+  // Top bit of the hops byte: the requester sits behind a small-packet radio
+  // (LoRa, ESP-NOW), so hosts must reply in small pieces.
+  bool narrow = false;
   uint32_t msgId = 0;
   uint16_t seq = 0, total = 0;
   std::string src, dst;
@@ -40,7 +44,7 @@ struct Packet {
     o.push_back(1);
     o.push_back(type);
     o.push_back(ttl);
-    o.push_back(hops);
+    o.push_back((hops & 0x7F) | (narrow ? 0x80 : 0));
     o.push_back(round);
     for (int s = 24; s >= 0; s -= 8) o.push_back((msgId >> s) & 0xFF);
     o.push_back(seq >> 8);
@@ -59,7 +63,8 @@ struct Packet {
     if (n < HEAD_LEN + 2 || p[0] != 'G' || p[1] != 'B' || p[2] != 1) return false;
     type = p[3];
     ttl = p[4];
-    hops = p[5];
+    hops = p[5] & 0x7F;
+    narrow = (p[5] & 0x80) != 0;
     round = p[6];
     msgId = ((uint32_t)p[7] << 24) | ((uint32_t)p[8] << 16) | ((uint32_t)p[9] << 8) | p[10];
     seq = (p[11] << 8) | p[12];

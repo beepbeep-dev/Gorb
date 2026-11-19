@@ -11,6 +11,10 @@ This firmware turns a cheap ESP32 LoRa board into a G.O.R.B Small radio.
   on the board and served to anyone who asks for your `.gorb` domain.
 * **Relay**: it always repeats G.O.R.B Small packets for everyone nearby (rule 2),
   even with nobody connected. Put one on a windowsill or a roof to extend the network.
+* **Gorb Wi-Fi**: it also talks straight to other G.O.R.B boards nearby over
+  Wi-Fi (ESP-NOW), and to laptops on its hotspot running `gorb ... --wifi`.
+  Packets pass between Wi-Fi and LoRa, so the board bridges the two networks.
+  This works on a bare ESP32 with no LoRa module.
 * **Radio for a computer** (optional): plugged in over USB it's the radio for
   `gorb browse/host/get --small ...`.
 

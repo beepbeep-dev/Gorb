@@ -8,6 +8,7 @@ nothing but a computer.
 | way | what you need | radio? |
 |---|---|---|
 | 1. Try it on your computer | Python | simulated |
+| Gorb Wi-Fi | computers on the same Wi-Fi, or ESP32s (no module) | real, license-free, short range |
 | 2. G.O.R.B Small with a computer | Python + an ESP32 with a LoRa radio | real, license-free |
 | 3. G.O.R.B Small, phone only | an ESP32 with a LoRa radio + your phone | real, license-free |
 
@@ -54,6 +55,31 @@ gorb host --callsign HOST-1 --site mysite.gorb=./my-folder
 ```bash
 gorb browse --callsign ME-1
 ```
+
+## Gorb Wi-Fi: real radio with what you already own
+
+Gorb Wi-Fi uses ordinary Wi-Fi with no internet. It's the quickest way to try
+real G.O.R.B between devices.
+
+**Two computers:** connect both to the same Wi-Fi (any router, even with the
+internet unplugged, or one computer's hotspot). Then:
+
+```bash
+gorb host --wifi --callsign HOST-1 --site mysite.gorb=./my-folder
+```
+
+```bash
+gorb browse --wifi --callsign ME-1
+```
+
+**Your ESP32 (no radio module):** flash `gorb-small-esp32dev.bin` (see below).
+Gorb Wi-Fi is on by default: the board talks to other G.O.R.B ESP32s nearby
+over ESP-NOW. With two ESP32s you have a complete network, browsing from
+your phone through each board's hotspot.
+
+**A computer plus an ESP32:** join the board's hotspot (GORB-xxxx) with the
+computer and run `gorb browse --wifi`. The computer is now part of the board's
+network, including the LoRa side if the board has a LoRa module.
 
 ## 2. and 3. G.O.R.B Small: real radios, no license
 
@@ -147,7 +173,9 @@ Flash the plain ESP32 file. Everything except the radio works:
 4. Type `gorb://test.gorb` in the address bar. Your own site opens straight
    from the board.
 
-Settings will say "radio off" until a module is connected. That's expected.
+Settings will say "LoRa off" until a module is connected. That's expected.
+Gorb Wi-Fi (ESP-NOW) works anyway, so a second ESP32 nearby can already
+browse your board's site.
 
 ### Using it
 

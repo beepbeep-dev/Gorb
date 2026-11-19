@@ -23,6 +23,7 @@ from .transport import Transport
 log = logging.getLogger("gorb")
 
 CHUNK = 180  # payload bytes per DATA packet; small chunks survive bad signal better
+NARROW_FRAME = 250  # biggest packet every radio can carry (ESP-NOW: 250, LoRa: 255)
 DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?\.gorb$")
 CALLSIGN_RE = re.compile(r"^[A-Za-z0-9/-]{3,20}$")
 
@@ -113,7 +114,8 @@ class Node:
                 raise GorbError(f"bad gorb domain {domain!r} (use something like cats.gorb)")
             self.sites[domain] = Path(d).resolve()
         # On G.O.R.B Small the ESP32 relays by itself, even with no computer.
-        self.relay = relay and not getattr(transport, "relays_in_hardware", False)
+        self.relay = (relay and not getattr(transport, "relays_in_hardware", False)
+                      and getattr(transport, "relay_useful", True))
         self.beacon_interval = beacon_interval
         self.ttl = ttl
 
@@ -328,7 +330,7 @@ class Node:
             blob = self._echo_get(pkt.dst, self._payload_path(pkt))
             if blob is None:
                 return
-            size = self._chunk_size(pkt.dst, pkt.src)
+            size = self._chunk_size(pkt.dst, pkt.src, pkt.narrow)
             chunks = [blob[i : i + size] for i in range(0, len(blob), size)] or [b""]
             with self._lock:
                 self._responses[(pkt.src, pkt.msg_id)] = (chunks, time.time())
@@ -450,7 +452,7 @@ class Node:
         threading.Thread(target=keep_them_waiting, daemon=True).start()
         try:
             blob = self._build_response(pkt.dst, pkt.payload.decode(errors="replace") or "/")
-            size = self._chunk_size(pkt.dst, pkt.src)
+            size = self._chunk_size(pkt.dst, pkt.src, pkt.narrow)
             chunks = [blob[i : i + size] for i in range(0, len(blob), size)] or [b""]
             with self._lock:
                 self._responses[key] = (chunks, time.time())
@@ -477,13 +479,23 @@ class Node:
             return
         self._send_chunks(pkt, chunks, [s for s in wanted if 0 <= s < len(chunks)], pkt.round)
 
-    def _chunk_size(self, src: str, dst: str) -> int:
-        """Biggest chunk that still fits in one radio frame (LoRa: 255 bytes)."""
+    @property
+    def narrow(self) -> bool:
+        """Are we on a small-packet radio (so replies to us must be small)?"""
+        mf = getattr(self.transport, "max_frame", None)
+        return mf is None or mf < 512
+
+    def _chunk_size(self, src: str, dst: str, narrow: bool = False) -> int:
+        """Biggest chunk that still fits in one radio frame on the way."""
         max_frame = getattr(self.transport, "max_frame", None)
+        chunk = getattr(self.transport, "chunk_size", CHUNK)  # Wi-Fi takes far bigger pieces
+        if narrow:  # the requester is behind LoRa/ESP-NOW somewhere: stay small
+            max_frame = min(max_frame or NARROW_FRAME, NARROW_FRAME)
+            chunk = min(chunk, CHUNK)
         if not max_frame:
-            return CHUNK
+            return chunk
         overhead = Packet(PacketType.DATA, src, dst).encode()
-        return max(32, min(CHUNK, max_frame - len(overhead)))
+        return max(32, min(chunk, max_frame - len(overhead)))
 
     def _send_chunks(self, req: Packet, chunks: list[bytes], seqs, rnd: int) -> None:
         ttl = max(self.ttl, req.hops + 1)
@@ -535,7 +547,7 @@ class Node:
         try:
             rnd = 0
             self._send(Packet(PacketType.GET, self.callsign, domain, path.encode(), msg_id,
-                              ttl=self.ttl))
+                              ttl=self.ttl, narrow=self.narrow))
             while True:
                 # Wait while chunks keep trickling in.
                 # Hosts on duty-cycle limited bands may pause between chunks.
@@ -571,7 +583,7 @@ class Node:
                 else:
                     log.info("no reply from %s yet, asking again", domain)
                     self._send(Packet(PacketType.GET, self.callsign, domain, path.encode(),
-                                      msg_id, ttl=self.ttl, round=rnd))
+                                      msg_id, ttl=self.ttl, round=rnd, narrow=self.narrow))
             if p.error:
                 raise GorbError(p.error)
             blob = b"".join(p.chunks[i] for i in range(p.total))

@@ -133,7 +133,7 @@ class SmallNetworkTest(unittest.TestCase):
                 self.assertGreater(relay_board.sent, 0)
                 self.assertIn("tiny.gorb", host_board.names)
                 # nothing the host sends can exceed one LoRa frame
-                self.assertEqual(host.transport.max_frame, 255)
+                self.assertEqual(host.transport.max_frame, 250)
             finally:
                 host.stop()
                 me.stop()

@@ -13,6 +13,6 @@ at 0x0 → Program → press the board's reset button).
 | `gorb-small-tbeam.bin` | LilyGo T-Beam (SX1276) |
 
 The ESP32 dev board file also runs on a bare ESP32 with no radio module:
-the hotspot, browser, site editor and picture upload all work, with the radio off.
+the hotspot, browser, site editor, picture upload and Gorb Wi-Fi (ESP-NOW to other boards) all work, with LoRa off.
 
 Rebuild these after changing the code (`pio run`, then esptool `merge_bin`).
