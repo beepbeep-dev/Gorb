@@ -22,7 +22,8 @@ On-air frame:
     leader   repeated known "sync" symbol (default 250 ms; keys VOX, AGC,
              and gives the receiver its timing and per-carrier channel estimate)
     marker   one sync symbol with inverted sign: "the frame starts here"
-    header   2 OFDM symbols, QPSK rate 1/2, sent twice:
+    header   QPSK rate 1/2, sent twice, in OFDM symbols 0 and 3 (payload
+             symbols fill 1, 2 and 4 onwards):
              mode (1 byte) | length (2 bytes) | CRC16 (2 bytes)
     payload  N OFDM symbols in the chosen mode:
              scrambled(payload + CRC32) -> conv code -> puncture -> interleave
@@ -48,10 +49,15 @@ DATA_IDX = np.setdiff1d(np.arange(N_ACT), PILOT_IDX)  # 48 data carriers
 N_DATA = len(DATA_IDX)
 PILOT_SPACING = 13
 EARLY = 24  # receiver starts each FFT window this many samples into the CP
-TX_CREST = 3.0  # TX clips the OFDM waveform at 3x RMS (9.5 dB crest factor)
+# TX clips the OFDM waveform at this many x RMS. Clipping adds a little in-band noise but makes
+# the signal louder for the same peak level, which matters on an FM radio's deviation limiter.
+TX_CREST = {1: 3.0, 2: 3.0, 3: 3.0, 4: 3.0, 5: 3.0, 6: 3.0}
 TX_PEAK = 0.9
+N_EST = 5  # leader copies averaged for the channel estimate (5 x 21 ms)
+SG_WIN, SG_ORDER = 7, 2  # channel estimate smoothing across carriers (local quadratic fit)
 MAX_PAYLOAD = 4096
 HEADER_SYMS = 2
+HEADER_POS = (0, 3)  # the two header copies sit in OFDM symbols 0 and 3, so one dropout can't take both
 
 # mode id -> (name, bits per QAM axis, code rate)
 MODES = {
@@ -251,13 +257,13 @@ def _header_bits(mode: int, length: int) -> np.ndarray:
 
 _HDR_INFO = 40
 _HDR_CODED = coded_len(_HDR_INFO, (1, 2))  # 92
-_HDR_CAP = HEADER_SYMS * N_DATA * 2  # 192 bits in 2 QPSK symbols
+_HDR_CAP = N_DATA * 2  # 96 bits: one QPSK symbol per header copy
 
 
 def _header_coded(mode: int, length: int) -> np.ndarray:
     c = conv_encode(_header_bits(mode, length), (1, 2))
     c = c[interleaver(len(c))]
-    return np.resize(c, _HDR_CAP)  # repeat the codeword to fill both symbols
+    return np.resize(c, _HDR_CAP)  # 92-bit codeword, padded to one symbol
 
 
 def payload_coded_len(nbytes: int, mode: int) -> int:
@@ -266,7 +272,7 @@ def payload_coded_len(nbytes: int, mode: int) -> int:
 
 def payload_symbols(nbytes: int, mode: int) -> int:
     m = MODES[mode][1]
-    return -(-payload_coded_len(nbytes, mode) // (N_DATA * 2 * m))
+    return max(2, -(-payload_coded_len(nbytes, mode) // (N_DATA * 2 * m)))
 
 
 def airtime(nbytes: int, mode="16qam-3/4", leader_ms: float = 250.0) -> float:
@@ -283,8 +289,11 @@ def bitrate(mode) -> float:
     return N_DATA * 2 * m * a / b * FS / SYM_LEN
 
 
-def modulate(payload: bytes, mode="16qam-3/4", leader_ms: float = 250.0) -> np.ndarray:
-    """Return float32 audio at 48 kHz (peak <= 0.9) for one frame."""
+def modulate(payload: bytes, mode="16qam-3/4", leader_ms: float = 250.0, crest: float | None = None) -> np.ndarray:
+    """Return float32 audio at 48 kHz (peak <= 0.9) for one frame.
+
+    `crest` is the TX clipping level in multiples of RMS (default: per mode, see TX_CREST).
+    """
     mode = MODE_BY_NAME[mode] if isinstance(mode, str) else mode
     if len(payload) > MAX_PAYLOAD:
         raise ValueError("payload too large")
@@ -295,11 +304,14 @@ def modulate(payload: bytes, mode="16qam-3/4", leader_ms: float = 250.0) -> np.n
     coded = coded[interleaver(len(coded))]
     Xp = _symbols_from_bits(coded, m)
     Xh = _symbols_from_bits(_header_coded(mode, len(payload)), 1)
-    t = _ofdm_time(np.vstack([Xh, Xp]))
+    if len(Xp) < 2:
+        Xp = np.vstack([Xp, _symbols_from_bits(np.zeros(1, np.uint8), m)])
+    t = _ofdm_time(np.vstack([Xh, Xp[:2], Xh, Xp[2:]]))
     t = np.hstack([t[:, -CP:], t]).reshape(-1)  # cyclic prefix
     n_leader = max(3, int(round(leader_ms / 1000 * FS / NFFT)))
     audio = np.concatenate([np.tile(SYNC_TIME, n_leader), -SYNC_TIME, t, np.zeros(FS // 100)])
-    audio = np.clip(audio, -TX_CREST, TX_CREST) * (TX_PEAK / TX_CREST)
+    crest = TX_CREST.get(mode, 3.0) if crest is None else crest
+    audio = np.clip(audio, -crest, crest) * (TX_PEAK / crest)
     ramp = FS // 200
     audio[:ramp] *= np.linspace(0, 1, ramp)
     return audio.astype(np.float32)
@@ -345,6 +357,22 @@ def _find_markers(x: np.ndarray, thresh: float = 0.45) -> list[int]:
     return out
 
 
+def _smooth(h: np.ndarray) -> np.ndarray:
+    """Savitzky-Golay smoothing across carriers (keeps the curvature of band-edge filters)."""
+    if SG_WIN <= 1:
+        return h
+    half = SG_WIN // 2
+    out = np.empty_like(h)
+    n = np.arange(len(h))
+    for i in range(len(h)):
+        lo, hi = max(0, i - half), min(len(h), i + half + 1)
+        if hi - lo < SG_WIN:  # at the edges use a one-sided window of full length
+            lo, hi = (0, SG_WIN) if lo == 0 else (len(h) - SG_WIN, len(h))
+        c = np.polyfit(n[lo:hi] - i, h[lo:hi], SG_ORDER)
+        out[i] = c[-1]
+    return out
+
+
 def _track(Z: np.ndarray):
     """Per-symbol timing (tau, samples) and common phase from pilots. Z: (nsym, N_ACT)."""
     zp = Z[:, PILOT_IDX] * np.conj(_PILOTS)
@@ -368,30 +396,44 @@ def _fit_line(y: np.ndarray, w: np.ndarray):
     return fit
 
 
-def _demod_symbols(x: np.ndarray, first: int, nsym: int, H: np.ndarray):
-    """Return equalized, phase-corrected data carriers and per-symbol noise variance."""
+def _bad_symbols(Z: np.ndarray, ref: float) -> np.ndarray:
+    """Symbols whose received power is far off the leader's: hit by a dropout or noise burst."""
+    p = np.mean(np.abs(Z) ** 2, axis=1)
+    med = ref
+    return (p > 2.0 * med) | (p < 0.3 * med)
+
+
+def _demod_symbols(x: np.ndarray, first: int, nsym: int, H: np.ndarray, ref: float):
+    """Equalize and phase-correct symbols. Returns (Z, bad) where bad flags clobbered symbols."""
     starts = first + np.arange(nsym) * SYM_LEN + CP - EARLY
     Z = _fft_syms(x, starts) / H
+    bad = _bad_symbols(Z, ref)
     tau, w = _track(Z)
+    w = np.where(bad, 0.0, w)
+    if not np.any(w > 0):
+        w = np.ones(nsym)
     tau_fit = _fit_line(tau, w)
     shift = np.round(tau_fit).astype(int)
     if np.any(shift != 0):  # re-time windows so drift never eats the cyclic prefix
         Z = _fft_syms(x, starts + shift) / H
-        tau, w = _track(Z)
-        tau_fit = _fit_line(tau, w)  # now the residual after the integer shift
+        tau, w2 = _track(Z)
+        w2 = np.where(bad, 0.0, w2)
+        # fit the line to the TOTAL offset, then remove the integer part we already applied
+        tau_fit = _fit_line(tau + shift, w2 if np.any(w2 > 0) else w) - shift
     rot = np.exp(2j * np.pi * BINS[None] * tau_fit[:, None] / NFFT)
     Z = Z * rot
     zp = Z[:, PILOT_IDX] * np.conj(_PILOTS)
-    cph = np.sum(zp, axis=1)
-    # smooth common phase/gain over +-3 symbols (channel is slow)
+    cph = np.where(bad, 0, np.sum(zp, axis=1))
+    # smooth common phase/gain over +-3 symbols (channel is slow), skipping bad symbols
     k = np.ones(7)
-    cph_s = np.convolve(cph, k)[3 : 3 + nsym] / np.convolve(np.ones(nsym), k)[3 : 3 + nsym]
-    g = np.abs(np.sum(cph)) / (nsym * len(PILOT_IDX))  # mean pilot amplitude
+    cph_s = np.convolve(cph, k)[3 : 3 + nsym]
+    good = (~bad).sum()
+    g = np.abs(np.sum(cph)) / (max(good, 1) * len(PILOT_IDX))  # mean pilot amplitude
     Z = Z * np.exp(-1j * np.angle(cph_s))[:, None] / max(g, 1e-9)
-    return Z
+    return Z, bad
 
 
-def _noise_and_llr(Zd: np.ndarray, H2: np.ndarray, Zp: np.ndarray, m: int):
+def _noise_and_llr(Zd: np.ndarray, H2: np.ndarray, Zp: np.ndarray, m: int, bad: np.ndarray):
     """Zd: (nsym, N_DATA) equalized data, H2: |H|^2 per data carrier, Zp pilots."""
     # decision-directed residual (in the pre-equalisation domain, i.e. times |H|^2)
     levels, _ = _gray_levels(m)
@@ -405,11 +447,12 @@ def _noise_and_llr(Zd: np.ndarray, H2: np.ndarray, Zp: np.ndarray, m: int):
     res_d = np.abs(Zd - dec) ** 2 * H2[None]
     res_p = np.abs(Zp - _PILOTS) ** 2 * H2.mean()
     sym_var = (res_d.sum(1) + res_p.sum(1)) / (Zd.shape[1] + Zp.shape[1])
-    frame_var = np.median(sym_var)
+    frame_var = np.median(sym_var[~bad]) if np.any(~bad) else np.median(sym_var)
     used = np.maximum(sym_var, frame_var)
     used = np.where(sym_var > 4 * frame_var, sym_var * 4, used)  # clobbered symbol: near-erase
     nvar = used[:, None] / H2[None]
     llr = qam_llr(Zd, nvar, m)  # (nsym, N_DATA, 2m) ordering: I bits, Q bits
+    llr[bad] = 0.0  # erase: let the code fill these bits in from the others
     snr = 10 * np.log10(H2.mean() / max(frame_var, 1e-12))
     return llr, snr
 
@@ -419,31 +462,34 @@ def receive(audio: np.ndarray) -> list[Candidate]:
     x = np.asarray(audio, dtype=np.float64)
     out = []
     for mk in _find_markers(x):
-        # channel estimate from the 3 leader copies before the marker
-        starts = mk - NFFT * np.arange(1, 4) - EARLY
+        # channel estimate from the last N_EST leader copies before the marker
+        starts = mk - NFFT * np.arange(1, N_EST + 1) - EARLY
         if starts.min() < 0:
             continue
         Y = _fft_syms(x, starts)
-        Hraw = Y.mean(0) / SYNC_FREQ
+        p = np.mean(np.abs(Y) ** 2, axis=1)
+        keep = (p < 2.0 * np.median(p)) & (p > 0.5 * np.median(p))  # skip leader copies hit by a dropout
+        Hraw = Y[keep].mean(0) / SYNC_FREQ
         # smooth across carriers: remove linear phase, moving average, put back
         slope = np.angle(np.sum(Hraw[1:] * np.conj(Hraw[:-1])))
         lin = np.exp(1j * slope * np.arange(N_ACT))
         Hs = Hraw / lin
-        kern = np.ones(5)
-        Hs = np.convolve(Hs, kern, "same") / np.convolve(np.ones(N_ACT), kern, "same")
+        Hs = _smooth(Hs)
         H = Hs * lin
         if not np.all(np.abs(H) > 1e-9):
             continue
         first = mk + NFFT
         # header
-        if first + HEADER_SYMS * SYM_LEN + NFFT > len(x):
+        if first + 4 * SYM_LEN > len(x):
             continue
-        Z = _demod_symbols(x, first, HEADER_SYMS, H)
+        ref = float(np.mean(np.abs(Y[keep] / H) ** 2))  # expected symbol power (signal + noise)
+        Z, bad = _demod_symbols(x, first, 4, H, ref)
+        hp = list(HEADER_POS)
         H2 = np.abs(H[DATA_IDX]) ** 2
-        llr, _ = _noise_and_llr(Z[:, DATA_IDX], H2, Z[:, PILOT_IDX], 1)
+        llr, _ = _noise_and_llr(Z[hp][:, DATA_IDX], H2, Z[hp][:, PILOT_IDX], 1, bad[hp] & ~np.all(bad[hp]))
         llr = llr.reshape(-1)
         comb = np.zeros(_HDR_CODED)
-        np.add.at(comb, np.arange(_HDR_CAP) % _HDR_CODED, llr)
+        np.add.at(comb, np.tile(np.arange(_HDR_CAP) % _HDR_CODED, 2), llr)
         deint = np.empty(_HDR_CODED)
         deint[interleaver(_HDR_CODED)] = comb
         hb = viterbi(depuncture(deint, _HDR_INFO), _HDR_INFO)[0]
@@ -460,8 +506,10 @@ def receive(audio: np.ndarray) -> list[Candidate]:
         if end > len(x) + CP:
             continue
         # demodulate header+payload together so timing tracking spans the whole frame
-        Z = _demod_symbols(x, first, HEADER_SYMS + nsym, H)[HEADER_SYMS:]
-        llr, snr = _noise_and_llr(Z[:, DATA_IDX], H2, Z[:, PILOT_IDX], m)
+        Z, bad = _demod_symbols(x, first, HEADER_SYMS + nsym, H, ref)
+        sel = np.setdiff1d(np.arange(HEADER_SYMS + nsym), HEADER_POS)
+        Z, bad = Z[sel], bad[sel]
+        llr, snr = _noise_and_llr(Z[:, DATA_IDX], H2, Z[:, PILOT_IDX], m, bad)
         llr = llr.reshape(-1)
         n = payload_coded_len(length, mode)
         deint = np.empty(n)

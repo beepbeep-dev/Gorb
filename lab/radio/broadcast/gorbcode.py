@@ -333,7 +333,7 @@ class LTCode:
         d = max(1, min(self.k, d))
         return rng.sample(range(self.k), d)
 
-    def symbols_to_decode(self, rng: random.Random, loss: float) -> int:
+    def symbols_to_decode(self, rng: random.Random, loss: float, start: int | None = None) -> int:
         """Feed a lossy stream; return how many symbols were received when the
         peeling decoder finished (structure only, no payload)."""
         known = [False] * self.k
@@ -341,7 +341,7 @@ class LTCode:
         pending: list[set] = []
         by_src: dict[int, list[int]] = {}
         got = 0
-        seq = 0
+        seq = rng.randrange(1 << 30) if start is None else start
         while nknown < self.k:
             seq += 1
             if rng.random() < loss:

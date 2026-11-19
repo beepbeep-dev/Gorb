@@ -371,6 +371,83 @@ def run_point(args):
     )
 
 
+LEADER_S = 0.25
+
+
+def leader_s(key):
+    """Seconds of each frame that are leader/preamble (needed once per key-up, not per frame)."""
+    if key == "afsk":
+        return Modulator().airtime(0) - (4 + 2 + 4 + 2) * 8 / 1200  # 0x55 preamble bytes only
+    if key.startswith("4fsk"):
+        return MFSK4().n_leader / 600
+    # OFDM: of the 12 leader sync symbols, later frames in a burst still keep 3 (+ the marker)
+    # so each frame can be found and re-equalised on its own; the other 9 are saved.
+    return 9 * m2.NFFT / FS
+
+
+def summarize(data, out_path):
+    """Write the tables used in REPORT.md (all numbers come from results.json)."""
+    res, names = data["results"], data["meta"]["names"]
+    lines = []
+
+    def get(key, chan, snr):
+        for r in res:
+            if r["modem"] == key and r["channel"] == chan and abs(r["snr"] - snr) < 1e-6:
+                return r
+        return None
+
+    for chan, snrs in (("awgn", [5, 10, 15, 20, 30]), ("fm", [10, 15, 20, 25, 30, 35]), ("fm+dropouts", [20, 25, 30, 35])):
+        lines.append(f"\n### {chan}: goodput in bit/s (frame error rate in brackets)\n")
+        lines.append("| modem | airtime/frame | " + " | ".join(f"{s} dB" for s in snrs) + " |")
+        lines.append("|---|---|" + "---|" * len(snrs))
+        best = {s: 0.0 for s in snrs}
+        for k in names:
+            row = [names[k], f"{get(k, chan, snrs[0])['airtime']:.2f} s"]
+            for s in snrs:
+                r = get(k, chan, s)
+                row.append(f"{r['goodput']:.0f} ({r['fer']:.2f})")
+                if k in OFDM_MODES:
+                    best[s] = max(best[s], r["goodput"])
+            lines.append("| " + " | ".join(row) + " |")
+        af = {s: get("afsk", chan, s)["goodput"] for s in snrs}
+        lines.append("| **Modem 2 adaptive (best OFDM mode)** | | " + " | ".join(
+            f"**{best[s]:.0f}** ({best[s] / af[s]:.1f}x)" if af[s] > 0 else f"**{best[s]:.0f}** (AFSK: 0)" for s in snrs) + " |")
+    # derived: what if several frames share one key-up (leader sent once), or a shorter leader
+    lines.append("\n### Derived from the measured FER on the FM path: leader overhead\n")
+    lines.append("goodput = (1-FER) x 1760 bits / airtime, with airtime recomputed analytically. FER is the measured value.\n")
+    lines.append("Burst assumption: later frames drop the leader but keep their sync word (AFSK, 4FSK) or 3 sync symbols + marker (OFDM).\n")
+    lines.append("| modem | data rate while sending payload | FM 20 dB: 1 frame/key-up (as measured) | 8 frames per key-up | FM 30 dB: 1 frame/key-up | 8 frames per key-up |")
+    lines.append("|---|---|---|---|---|---|")
+    for k in names:
+        lead = leader_s(k)
+        row = [names[k]]
+        r30 = get(k, "fm", 30)
+        body = r30["airtime"] - lead
+        row.append(f"{PAYLOAD * 8 / body:.0f} b/s")
+        for s in (20, 30):
+            r = get(k, "fm", s)
+            single = r["goodput"]
+            burst = (1 - r["fer"]) * PAYLOAD * 8 * 8 / (lead + 8 * body)
+            row += [f"{single:.0f}", f"{burst:.0f}"]
+        lines.append("| " + " | ".join(row) + " |")
+    for chan in ("fm-drive", "fm-ppm"):
+        field = "drive_db" if chan == "fm-drive" else "ppm"
+        lines.append(f"\n### {chan} (FM path, 30 dB): goodput (FER)\n")
+        vals = sorted({r["extra"][field] for r in res if r["channel"] == chan})
+        lines.append(f"| modem | " + " | ".join(f"{field}={v:g}" for v in vals) + " |")
+        lines.append("|---|" + "---|" * len(vals))
+        for k in names:
+            rs = {r["extra"][field]: r for r in res if r["channel"] == chan and r["modem"] == k}
+            if rs:
+                lines.append(f"| {names[k]} | " + " | ".join(f"{rs[v]['goodput']:.0f} ({rs[v]['fer']:.2f})" for v in vals) + " |")
+    false_total = sum(r["false_frames"] for r in res)
+    frames_total = sum(r["frames"] for r in res)
+    lines.append(f"\nFrames simulated: {frames_total}; frames delivered with wrong content (CRC false pass): {false_total}. "
+                 f"Runtime {data['meta']['runtime_s']:.0f} s, {data['meta']['frames_per_point']} frames per point.")
+    open(out_path, "w").write("\n".join(lines) + "\n")
+    print("\n".join(lines))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="few frames, coarse SNR grid")
@@ -383,10 +460,13 @@ def main():
     if a.plot:
         import modem_plots
 
-        modem_plots.plot_all(json.load(open(path)), RESULTS)
+        data = json.load(open(path))
+        modem_plots.plot_all(data, RESULTS, suffix="_quick" if a.quick else "")
+        if not a.quick:
+            summarize(data, os.path.join(RESULTS, "summary.md"))
         return
 
-    nf = a.frames or (16 if a.quick else 150)
+    nf = a.frames or (16 if a.quick else 120)
     snrs = np.arange(0, 41, 10 if a.quick else 2.5)
     tasks = []
     seed = 1
@@ -427,6 +507,8 @@ def main():
     import modem_plots
 
     modem_plots.plot_all(dict(meta=meta, results=results), RESULTS, suffix="_quick" if a.quick else "")
+    if not a.quick:
+        summarize(dict(meta=meta, results=results), os.path.join(RESULTS, "summary.md"))
 
 
 if __name__ == "__main__":
