@@ -442,6 +442,10 @@ static const char *contentType(const std::string &f) {
   if (ends(".txt")) return "text/plain";
   if (ends(".css")) return "text/css";
   if (ends(".svg")) return "image/svg+xml";
+  if (ends(".webp")) return "image/webp";
+  if (ends(".jpg") || ends(".jpeg")) return "image/jpeg";
+  if (ends(".png")) return "image/png";
+  if (ends(".gif")) return "image/gif";
   return "application/octet-stream";
 }
 
@@ -582,10 +586,66 @@ struct CachedPage {
 static CachedPage cache[2];
 static uint8_t cacheNext = 0;
 
+// Pictures (Gorb Pixels / Gorb Motion) get their own cache, capped in bytes
+// so a picture-heavy page can't run the board out of memory.
+static const size_t MEDIA_CACHE_BYTES = 48 * 1024;
+static std::vector<CachedPage> mediaCache;
+
+static void mediaPut(CachedPage &&p) {
+  for (auto it = mediaCache.begin(); it != mediaCache.end(); ++it)
+    if (it->url == p.url) {
+      mediaCache.erase(it);
+      break;
+    }
+  size_t total = p.body.size();
+  for (auto &m : mediaCache) total += m.body.size();
+  while (total > MEDIA_CACHE_BYTES && !mediaCache.empty()) {  // drop the oldest
+    total -= mediaCache.front().body.size();
+    mediaCache.erase(mediaCache.begin());
+  }
+  mediaCache.push_back(std::move(p));
+}
+
 static CachedPage *cacheFind(const std::string &url) {
   for (auto &c : cache)
     if (!c.url.empty() && c.url == url && millis() - c.at < 300000) return &c;
+  for (auto &c : mediaCache)
+    if (c.url == url && millis() - c.at < 300000) return &c;
   return nullptr;
+}
+
+static bool isPicture(const std::string &ctype) {
+  return ctype.compare(0, 6, "image/") == 0 && ctype != "image/svg+xml";
+}
+
+// After a page arrives, its pictures are fetched one by one before the page
+// is shown, so it appears complete.
+static std::string mediaFor;  // page whose pictures are loading
+static std::vector<std::string> mediaQueue;
+static std::string mediaInFlight;
+static size_t mediaTotal = 0, mediaDone = 0;
+static std::vector<std::string> mediaFailed;
+
+static void queueMedia(const std::string &url, const std::string &html) {
+  std::string domain, path;
+  if (!gorb::parseUrl(url, domain, path)) return;
+  mediaFor = url;
+  mediaQueue.clear();
+  mediaInFlight.clear();
+  mediaFailed.clear();
+  mediaDone = 0;
+  for (auto &src : gorb::findImages(gorb::videoToImg(html))) {
+    std::string u = gorb::resolveUrl(domain, path, src);
+    if (u.empty() || cacheFind(u)) continue;
+    bool dup = false;
+    for (auto &q : mediaQueue) dup |= q == u;
+    if (!dup && mediaQueue.size() < 6) mediaQueue.push_back(u);
+  }
+  mediaTotal = mediaQueue.size();
+}
+
+static bool mediaPending(const std::string &pageUrl) {
+  return mediaFor == pageUrl && (!mediaQueue.empty() || !mediaInFlight.empty());
 }
 
 static void cachePut(CachedPage &&p) {
@@ -635,6 +695,11 @@ static void finishPage(const std::string &url, int status, std::string ctype, st
   p.hops = hops;
   p.secs = secs;
   p.at = millis();
+  if (isPicture(p.ctype)) {
+    if (p.status < 400) mediaPut(std::move(p));
+    return;
+  }
+  if (p.ctype == "text/html" && p.status < 400 && url != mediaInFlight) queueMedia(url, p.body);
   cachePut(std::move(p));
 }
 
@@ -769,6 +834,25 @@ static void serviceFetch() {
   } else {
     sendGet();
   }
+}
+
+static void serviceMedia() {
+  if (!mediaInFlight.empty()) {
+    if (fetchState.active && fetchState.url == mediaInFlight) return;  // still coming
+    if (!cacheFind(mediaInFlight)) mediaFailed.push_back(mediaInFlight);
+    mediaInFlight.clear();
+    mediaDone++;
+  }
+  if (mediaQueue.empty() || fetchState.active) return;
+  std::string url = mediaQueue.front();
+  mediaQueue.erase(mediaQueue.begin());
+  std::string domain, path;
+  if (!gorb::parseUrl(url, domain, path)) {
+    mediaDone++;
+    return;
+  }
+  mediaInFlight = url;
+  startFetch(url, domain, path);
 }
 
 // ==========================================================================
@@ -1073,9 +1157,36 @@ static void handlePage(const std::string &rest) {
   server.sendHeader("Cache-Control", "no-store");
 
   CachedPage *page = retry ? nullptr : cacheFind(url);
+  if (page && isPicture(page->ctype)) {  // a picture on a page (or opened directly)
+    server.sendHeader("Cache-Control", "max-age=600", true);
+    server.setContentLength(page->body.size());
+    server.send(200, S(page->ctype), "");
+    server.sendContent(page->body.data(), page->body.size());
+    return;
+  }
+  if (!page) {
+    for (auto &f : mediaFailed)
+      if (f == url) {  // a picture that didn't make it: don't refetch it for every view
+        server.send(404, "text/plain", "picture lost");
+        return;
+      }
+  }
+  if (page && mediaPending(url)) {  // page is here, its pictures are still arriving
+    std::string b = "<!doctype html><html><head><meta charset=\"utf-8\">"
+                    "<meta http-equiv=\"refresh\" content=\"1; url=/g/" + d2 + p2 + "\">";
+    b += TUNING_PAGE;
+    b += "<div>page received, now the pictures</div><div>picture " +
+         std::to_string(std::min(mediaDone + 1, mediaTotal)) + " of " + std::to_string(mediaTotal);
+    if (fetchState.active && fetchState.total)
+      b += ": " + std::to_string(fetchState.have) + "/" + std::to_string(fetchState.total) +
+           " pieces";
+    b += "</div></body></html>";
+    server.send(200, "text/html; charset=utf-8", S(b));
+    return;
+  }
   if (page) {
     std::string body = page->ctype == "text/html"
-                           ? gorb::rewriteLinks(page->body, d2)
+                           ? gorb::rewriteLinks(gorb::videoToImg(page->body), d2)
                            : "<pre>" + esc(page->body) + "</pre>";
     char foot[200];
     snprintf(foot, sizeof(foot),
@@ -1099,6 +1210,9 @@ static void handlePage(const std::string &rest) {
   }
 
   if (!fetchState.active || fetchState.url != url) {
+    mediaQueue.clear();  // the user went somewhere else
+    mediaInFlight.clear();
+    mediaFor.clear();
     startFetch(url, d2, p2);
     if (CachedPage *now = cacheFind(url)) {  // own site: ready instantly
       (void)now;
@@ -1226,6 +1340,7 @@ static void handleSite() {
       editName = "index.html";
     }
   }
+  if (isPicture(contentType(editName))) editName = "index.html";
   if (editBody.empty()) readFile(editName, editBody);
 
   std::string b = topBar("") + "<div class=\"wrap\"><h2>My site</h2>" + msg +
@@ -1243,8 +1358,16 @@ static void handleSite() {
       size_t s = n.rfind('/');
       if (s != std::string::npos) n = n.substr(s + 1);
       any = true;
-      b += "<li><a href=\"/site?edit=" + urlEncode(n) + "\">" + esc(n) + "</a> <span class=\"meta\">" +
-           std::to_string(f.size()) + " bytes</span></li>";
+      if (isPicture(contentType(n))) {  // pictures can't be edited as text
+        b += "<li>" + esc(n) + " <span class=\"meta\">" + std::to_string(f.size()) +
+             " bytes, use it as &lt;img src=&quot;" + esc(n) + "&quot;&gt;</span> "
+             "<form method=\"post\" style=\"display:inline\"><input type=\"hidden\" name=\"action\" "
+             "value=\"delete\"><input type=\"hidden\" name=\"file\" value=\"" + esc(n) +
+             "\"><button class=\"ghost\">delete</button></form></li>";
+      } else {
+        b += "<li><a href=\"/site?edit=" + urlEncode(n) + "\">" + esc(n) +
+             "</a> <span class=\"meta\">" + std::to_string(f.size()) + " bytes</span></li>";
+      }
     }
   }
   if (!any) b += "<li class=\"meta\">No pages yet. Start with index.html below.</li>";
@@ -1254,7 +1377,7 @@ static void handleSite() {
        "\" autocapitalize=\"off\"><label>HTML (vibecoded welcome; no scripts, they won't run)</label>"
        "<textarea name=\"content\" spellcheck=\"false\">" +
        esc(editBody) +
-       "</textarea><p><button>Save page</button></p></form>"
+       "</textarea><p><button>Save page</button></p></form>" + std::string(PICTURE_UPLOAD) +
        "<form method=\"post\" onsubmit=\"return confirm('Delete this page?')\">"
        "<input type=\"hidden\" name=\"action\" value=\"delete\"><input type=\"hidden\" name=\"file\" "
        "value=\"" +
@@ -1262,6 +1385,51 @@ static void handleSite() {
        "</button></form><p class=\"meta\">Pages are sent uncompressed from the board, so keep them "
        "small: about 1 KB loads in a few seconds.</p></div>";
   sendHtml(200, b);
+}
+
+// Picture upload (already shrunk by the phone, see PICTURE_UPLOAD).
+static File uploadFile;
+static std::string uploadName, uploadErr;
+static size_t uploadSize = 0;
+
+static void handleUploadChunk() {
+  HTTPUpload &up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    uploadErr.clear();
+    uploadSize = 0;
+    uploadName = up.filename.c_str();
+    for (auto &c : uploadName) c = gorb::lower(c);
+    if (!safeFileName(uploadName) || !isPicture(contentType(uploadName))) {
+      uploadErr = "Only .webp, .jpg, .png or .gif pictures with simple names.";
+      return;
+    }
+    uploadFile = LittleFS.open(("/site/" + uploadName).c_str(), "w");
+    if (!uploadFile) uploadErr = "Could not save (storage full?).";
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (!uploadErr.empty() || !uploadFile) return;
+    uploadSize += up.currentSize;
+    if (uploadSize > MAX_BODY) {
+      uploadErr = "Too big for radio (over 32 KB). The page shrinks pictures before uploading; "
+                  "if that failed, use 'gorb shrink' on a computer.";
+      uploadFile.close();
+      LittleFS.remove(("/site/" + uploadName).c_str());
+      return;
+    }
+    uploadFile.write(up.buf, up.currentSize);
+  } else if (up.status == UPLOAD_FILE_END || up.status == UPLOAD_FILE_ABORTED) {
+    if (uploadFile) uploadFile.close();
+  }
+}
+
+static void handleUploadDone() {
+  if (!uploadErr.empty()) {
+    server.send(400, "text/plain", S(uploadErr));
+    return;
+  }
+  mediaCache.clear();
+  server.send(200, "text/plain",
+              S("Saved " + uploadName + " (" + std::to_string(uploadSize) +
+                " bytes). Put it on a page with <img src=\"" + uploadName + "\">"));
 }
 
 static void handleNotFound() {
@@ -1304,6 +1472,7 @@ void setup() {
   server.on("/go", handleGo);
   server.on("/settings", handleSettings);
   server.on("/site", handleSite);
+  server.on("/upload", HTTP_POST, handleUploadDone, handleUploadChunk);
   server.onNotFound(handleNotFound);
   server.begin();
 
@@ -1318,6 +1487,7 @@ void loop() {
   server.handleClient();
   if (rxFlag) handleRadioPacket();
   serviceFetch();
+  serviceMedia();
   serviceHost();
   if (radioOk && (beaconSoon || millis() - lastBeacon > BEACON_MS)) sendBeacon();
   serviceTxQueue();

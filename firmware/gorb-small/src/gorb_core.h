@@ -412,6 +412,100 @@ inline std::string rewriteLinks(const std::string &html, const std::string &doma
   return out;
 }
 
+// Case-insensitive "does html have `word` at position i".
+inline bool startsWithAt(const std::string &html, size_t i, const char *word) {
+  size_t n = strlen(word);
+  if (i + n > html.size()) return false;
+  for (size_t k = 0; k < n; k++)
+    if (lower(html[i + k]) != word[k]) return false;
+  return true;
+}
+
+// Value of attribute `name` inside one tag (html[start..end)), or "".
+inline std::string tagAttr(const std::string &html, size_t start, size_t end, const char *name) {
+  size_t n = strlen(name);
+  for (size_t i = start; i + n + 2 < end; i++) {
+    if ((html[i] == ' ' || html[i] == '\n' || html[i] == '\t') && startsWithAt(html, i + 1, name) &&
+        html[i + 1 + n] == '=' && (html[i + 2 + n] == '"' || html[i + 2 + n] == '\'')) {
+      char q = html[i + 2 + n];
+      size_t v = i + 3 + n;
+      size_t e = html.find(q, v);
+      if (e == std::string::npos || e > end) return "";
+      return html.substr(v, e - v);
+    }
+  }
+  return "";
+}
+
+// Gorb Motion on the board: <video src=x>...</video> becomes <img src=x>,
+// since hosts send videos as short looping animated pictures.
+inline std::string videoToImg(const std::string &html) {
+  std::string out;
+  size_t i = 0;
+  while (i < html.size()) {
+    if (html[i] == '<' && startsWithAt(html, i + 1, "video") &&
+        (i + 6 < html.size() && (html[i + 6] == ' ' || html[i + 6] == '>'))) {
+      size_t tagEnd = html.find('>', i);
+      size_t close = std::string::npos;
+      for (size_t k = i; k + 8 <= html.size(); k++)
+        if (startsWithAt(html, k, "</video")) {
+          close = k;
+          break;
+        }
+      if (tagEnd == std::string::npos || close == std::string::npos) break;
+      std::string src = tagAttr(html, i, tagEnd, "src");
+      if (src.empty()) {  // look for <source src=...> inside
+        for (size_t k = tagEnd; k < close; k++)
+          if (html[k] == '<' && startsWithAt(html, k + 1, "source")) {
+            size_t e = html.find('>', k);
+            if (e != std::string::npos) src = tagAttr(html, k, e, "src");
+            break;
+          }
+      }
+      if (!src.empty()) out += "<img src=\"" + src + "\" alt=\"video clip\" style=\"max-width:100%\">";
+      size_t closeEnd = html.find('>', close);
+      i = closeEnd == std::string::npos ? html.size() : closeEnd + 1;
+      continue;
+    }
+    out += html[i++];
+  }
+  return out;
+}
+
+// src of every <img> (after videoToImg), in page order.
+inline std::vector<std::string> findImages(const std::string &html) {
+  std::vector<std::string> out;
+  for (size_t i = 0; i < html.size(); i++) {
+    if (html[i] == '<' && startsWithAt(html, i + 1, "img") && i + 4 < html.size() &&
+        (html[i + 4] == ' ' || html[i + 4] == '\n')) {
+      size_t e = html.find('>', i);
+      if (e == std::string::npos) break;
+      std::string src = tagAttr(html, i, e, "src");
+      if (!src.empty()) out.push_back(src);
+      i = e;
+    }
+  }
+  return out;
+}
+
+// Turn a link found on gorb://<domain><pagePath> into a full gorb:// URL.
+// Returns "" for links that aren't on G.O.R.B (http, data:, ...).
+inline std::string resolveUrl(const std::string &domain, const std::string &pagePath,
+                              const std::string &link) {
+  if (link.empty() || link.find("://") != std::string::npos) {
+    return link.compare(0, 7, "gorb://") == 0 ? link : "";
+  }
+  if (link.compare(0, 5, "data:") == 0 || link[0] == '#') return "";
+  if (link[0] == '/') return "gorb://" + domain + link;
+  std::string dir = pagePath.substr(0, pagePath.rfind('/') + 1);
+  std::string rel = link.compare(0, 2, "./") == 0 ? link.substr(2) : link;
+  while (rel.compare(0, 3, "../") == 0) {
+    rel = rel.substr(3);
+    if (dir.size() > 1) dir = dir.substr(0, dir.rfind('/', dir.size() - 2) + 1);
+  }
+  return "gorb://" + domain + dir + rel;
+}
+
 inline std::string htmlEscape(const std::string &s) {
   std::string o;
   for (char c : s) {

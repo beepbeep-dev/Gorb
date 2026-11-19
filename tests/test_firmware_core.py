@@ -78,6 +78,16 @@ class FirmwareCoreTest(unittest.TestCase):
         self.assertEqual(self.run_exe("url", data=b"cats")[1], b"cats.gorb /")
         self.assertEqual(self.run_exe("url", data=b"bad domain")[1], b"bad")
 
+    def test_media_on_board(self):
+        page = (b'<p>hi</p><IMG src="a.webp"><img alt=x src="/pics/b.jpg">'
+                b'<video controls width="300"><source src="../clips/c.mp4"></video>'
+                b'<img src="https://example.com/x.png"><img src="gorb://dogs.gorb/d.png">')
+        out = self.run_exe("media", "cats.gorb", "/blog/post.html", data=page)[1].decode().split("\n")
+        self.assertNotIn("<video", out[0])
+        self.assertIn('<img src="../clips/c.mp4"', out[0])
+        self.assertEqual(out[1:6], ["gorb://cats.gorb/blog/a.webp", "gorb://cats.gorb/pics/b.jpg",
+                                    "gorb://cats.gorb/clips/c.mp4", "", "gorb://dogs.gorb/d.png"])
+
 
 if __name__ == "__main__":
     unittest.main()

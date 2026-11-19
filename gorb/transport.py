@@ -91,6 +91,9 @@ class SimTransport(Transport):
         self.rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if hasattr(socket, "SO_REUSEPORT"):
             self.rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        # Big receive buffer: without --realtime, stations fire packets back to
+        # back and a small buffer would drop them (a real radio can't do that).
+        self.rx.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
         self.rx.bind(("", self.port))
         mreq = struct.pack("4s4s", socket.inet_aton(_SIM_GROUP), socket.inet_aton("127.0.0.1"))
         self.rx.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
@@ -112,6 +115,8 @@ class SimTransport(Transport):
         self.tx.sendto(head + pcm, (_SIM_GROUP, self.port))
         if self.realtime:
             time.sleep(len(audio) / self.config.sample_rate)
+        else:
+            time.sleep(0.002)  # keep the receivers from being flooded
 
     def airtime(self, nbytes: int) -> float:
         # Without --realtime the simulated band delivers instantly.

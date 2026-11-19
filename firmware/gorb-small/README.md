@@ -28,6 +28,11 @@ own board.
 5. Optional: go to **My site**, pick a domain like `cats.gorb`, and write `index.html`.
 6. Type a gorb:// address in the bar and tap **Tune in**.
 
+Pictures: in **My site → Add a picture**, pick any photo. Your phone shrinks
+it to about 6 KB before uploading, then you put it on a page with
+`<img src="name.webp">`. Pages with pictures show up once their pictures
+have arrived. Videos from computer hosts play as short silent clips.
+
 Speeds: a 1 KB page takes a few seconds; pages hosted on a board are sent
 uncompressed and capped at 32 KB.
 

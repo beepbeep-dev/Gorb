@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -15,7 +16,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import rules
+from . import media, rules
 from .packet import Packet, PacketType
 from .transport import Transport
 
@@ -87,10 +88,13 @@ class Node:
         relay: bool = True,
         beacon_interval: float = 600.0,
         ttl: int = 3,
+        image_budget: int = media.DEFAULT_IMAGE_BUDGET,
+        motion_budget: int = media.DEFAULT_MOTION_BUDGET,
     ):
         if not CALLSIGN_RE.match(callsign):
             raise GorbError(f"bad callsign {callsign!r}")
         self.transport = transport
+        self.media = media.MediaCache(image_budget, motion_budget)
         self.callsign = callsign.upper()
         self.sites: dict[str, Path] = {}
         for domain, d in (site_dirs or {}).items():
@@ -110,7 +114,10 @@ class Node:
         self._pending: dict[int, _Pending] = {}
         self._responses: OrderedDict[tuple, tuple[list[bytes], float]] = OrderedDict()
         self._lock = threading.RLock()
-        self._txq: queue.Queue[Packet] = queue.Queue()
+        # Small things go first: requests, relays and short replies (pages,
+        # picture previews) jump ahead of long replies (full pictures, video).
+        self._txq: queue.PriorityQueue[tuple[int, int, Packet]] = queue.PriorityQueue()
+        self._txcount = itertools.count()
         self._tx_time = 0.0
         self._started = time.monotonic()
         self._stop = threading.Event()
@@ -133,12 +140,16 @@ class Node:
     # --------------------------------------------------------------- sending
     def _send(self, pkt: Packet) -> None:
         self._remember(pkt.key)
-        self._txq.put(pkt)
+        self._queue(pkt)
+
+    def _queue(self, pkt: Packet) -> None:
+        prio = pkt.total if pkt.type == PacketType.DATA else 0
+        self._txq.put((prio, next(self._txcount), pkt))
 
     def _tx_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                pkt = self._txq.get(timeout=0.5)
+                _, _, pkt = self._txq.get(timeout=0.5)
             except queue.Empty:
                 continue
             frame = pkt.encode()
@@ -228,7 +239,7 @@ class Node:
             if self._seen.get(pkt.key, 0) > 2:
                 return
             self.stats["relayed"] += 1
-            self._txq.put(pkt.relayed())
+            self._queue(pkt.relayed())
 
         delay = random.uniform(0.05, 0.4) + self.transport.airtime(len(pkt.payload) + 40) * 0.5
         threading.Timer(delay, go).start()
@@ -250,6 +261,15 @@ class Node:
             status, ctype, body = 404, "text/html", (
                 f"<h1>404 - not on this frequency</h1><p>{domain}{path} was not found.</p>"
             ).encode()
+        elif media.is_media(target):
+            # Gorb Pixels / Gorb Motion: shrink to fit the radio first.
+            variant = "preview" if "gorb=preview" in path.partition("?")[2] else "full"
+            try:
+                ctype, body = self.media.get(target, variant)
+                status = 200
+            except media.MediaError as e:
+                log.warning("can't send %s%s: %s", domain, path, e)
+                status, ctype, body = 415, "text/html", f"<p>{e}</p>".encode()
         else:
             body = target.read_bytes()
             ctype = {

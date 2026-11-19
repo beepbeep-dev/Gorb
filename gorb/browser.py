@@ -19,40 +19,96 @@ from urllib.parse import parse_qs, quote, urljoin, urlparse
 from . import rules
 from .node import GorbError, Node, Page, parse_url
 
-PAGE_CSP = (
-    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
-    "font-src data:; form-action 'none'; base-uri 'none'"
-)
+def page_csp(server_origin: str) -> str:
+    """Pages may only load pictures from this browser (which fetches them by radio)."""
+    return (
+        f"default-src 'none'; style-src 'unsafe-inline'; img-src data: {server_origin}; "
+        "font-src data:; form-action 'none'; base-uri 'none'"
+    )
 
-_ATTR_RE = re.compile(r"""(\s(?:href|src|action)\s*=\s*)(["'])(.*?)\2""", re.IGNORECASE | re.DOTALL)
+
+PAGE_CSP = page_csp("'self'")
+
+_TAG_RE = re.compile(r"<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>", re.DOTALL)
+_ATTR_RE = re.compile(r"""(\s(?:href|src|action|poster|srcset)\s*=\s*)(["'])(.*?)\2""",
+                      re.IGNORECASE | re.DOTALL)
+_STYLE_RE = re.compile(r"""\sstyle\s*=\s*(["'])(.*?)\1""", re.IGNORECASE | re.DOTALL)
 _SCRIPT_RE = re.compile(r"<script\b.*?</script\s*>", re.IGNORECASE | re.DOTALL)
+_VIDEO_RE = re.compile(r"<video\b([^>]*)>(.*?)</video\s*>", re.IGNORECASE | re.DOTALL)
+_SRC_RE = re.compile(r"""\ssrc\s*=\s*(["'])(.*?)\1""", re.IGNORECASE | re.DOTALL)
+_KEEP_RE = re.compile(r"""\s(?:width|height|class|style|title|alt)\s*=\s*(["']).*?\1""",
+                      re.IGNORECASE | re.DOTALL)
+
+
+def _video_to_img(m: re.Match) -> str:
+    """Gorb Motion: a <video> becomes a silent looping clip shown as an image."""
+    attrs, inner = m.group(1), m.group(2)
+    src = _SRC_RE.search(attrs) or _SRC_RE.search(inner)
+    if not src:
+        return ""
+    keep = "".join(k.group(0) for k in _KEEP_RE.finditer(attrs))
+    return f"<img src={src.group(1)}{src.group(2)}{src.group(1)}{keep} alt=\"video clip\">"
 
 
 def rewrite_links(page_html: str, base_url: str) -> str:
-    """Point gorb links back at the browser, open web links in a new tab."""
+    """Make a received page work inside the browser.
+
+    * gorb links go back through the browser (/go), web links stay as they are
+    * pictures and videos are fetched over the radio (/media), with a tiny
+      blurry preview shown behind each picture until the real one arrives
+    """
     domain, path = parse_url(base_url)
     base = f"http://{domain}{path}"
 
-    def fix(m: re.Match) -> str:
-        prefix, quote_char, target = m.group(1), m.group(2), html.unescape(m.group(3)).strip()
+    def resolve(target: str) -> str | None:
+        """Absolute gorb:// URL for a link, or None if it isn't a gorb link."""
         low = target.lower()
-        if low.startswith(("data:", "#", "mailto:")):
-            new = target
-        elif low.startswith(("http://", "https://")):
-            new = target  # the regular web; opens outside G.O.R.B
-        elif low.startswith("javascript:"):
-            new = "#"
-        else:
-            if low.startswith("gorb://"):
-                absolute = target
+        if low.startswith(("data:", "#", "mailto:", "http://", "https://", "javascript:")):
+            return None
+        if low.startswith("gorb://"):
+            return target
+        u = urlparse(urljoin(base, target))
+        return f"gorb://{u.netloc}{u.path or '/'}" + (f"?{u.query}" if u.query else "")
+
+    def fix_tag(m: re.Match) -> str:
+        tag, attrs = m.group(1).lower(), m.group(2)
+        preview = None
+
+        def fix_attr(a: re.Match) -> str:
+            nonlocal preview
+            prefix, q, raw = a.group(1), a.group(2), html.unescape(a.group(3)).strip()
+            name = prefix.strip().split("=")[0].strip().lower()
+            if name == "srcset":
+                return ""  # one picture is plenty over radio
+            if raw.lower().startswith("javascript:"):
+                return f"{prefix}{q}#{q}"
+            absolute = resolve(raw)
+            if absolute is None:
+                return a.group(0)
+            if name in ("src", "poster") and tag in ("img", "image", "input"):
+                media_url = "/media?url=" + quote(absolute, safe="")
+                preview = media_url + "&v=preview"
+                new = media_url
+            elif name == "href":
+                new = "/go?url=" + quote(absolute, safe="")
             else:
-                u = urlparse(urljoin(base, target))
-                absolute = f"gorb://{u.netloc}{u.path or '/'}"
-            new = "/go?url=" + quote(absolute, safe="")
-        return f"{prefix}{quote_char}{html.escape(new, quote=True)}{quote_char}"
+                new = "#"  # iframes, audio, ... aren't supported over radio
+            return f"{prefix}{q}{html.escape(new, quote=True)}{q}"
+
+        attrs = _ATTR_RE.sub(fix_attr, attrs)
+        if preview:
+            bg = f"background:url({preview}) center/cover no-repeat;"
+            st = _STYLE_RE.search(attrs)
+            if st:
+                attrs = attrs[:st.start()] + f" style={st.group(1)}{html.escape(bg)}" \
+                    f"{st.group(2)}{st.group(1)}" + attrs[st.end():]
+            else:
+                attrs += f' style="{html.escape(bg)}"'
+        return f"<{m.group(1)}{attrs}>"
 
     out = _SCRIPT_RE.sub("", page_html)  # scripts can't run anyway; save bytes
-    out = _ATTR_RE.sub(fix, out)
+    out = _VIDEO_RE.sub(_video_to_img, out)
+    out = _TAG_RE.sub(fix_tag, out)
     return '<base target="_top">' + out
 
 
@@ -105,12 +161,13 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # keep the console quiet
         pass
 
-    def _send(self, code: int, body: str | bytes, ctype="text/html; charset=utf-8", csp=None):
+    def _send(self, code: int, body: str | bytes, ctype="text/html; charset=utf-8", csp=None,
+              cache: str = "no-store"):
         data = body.encode() if isinstance(body, str) else body
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         if csp:
             self.send_header("Content-Security-Policy", csp)
         self.end_headers()
@@ -146,6 +203,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, self._chrome(url, frame, " - " + url))
         if u.path == "/frame":
             return self._frame(q.get("url", ""), refresh="refresh" in q)
+        if u.path == "/media":
+            return self._media(q.get("url", ""), preview=q.get("v") == "preview")
         if u.path == "/api/status":
             info = {
                 "callsign": self.node.callsign,
@@ -161,26 +220,58 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Location", where)
         self.end_headers()
 
-    def _frame(self, url: str, refresh: bool):
-        page = None if refresh else self.cache.get(url)
-        if page is None or time.time() - page_time(page) > 300:
-            try:
+    def _csp(self) -> str:
+        host = self.headers.get("Host", "")
+        origin = f"http://{host}" if re.fullmatch(r"[A-Za-z0-9.\-]+(:\d+)?", host) else "'self'"
+        return page_csp(origin)
+
+    def _get(self, url: str, refresh: bool = False) -> Page:
+        """Fetch over the radio, sharing one fetch between everyone asking for
+        the same URL at the same time (a page with the same picture twice)."""
+        with self.lock:
+            url_lock = self.url_locks.setdefault(url, threading.Lock())
+        with url_lock:
+            page = None if refresh else self.cache.get(url)
+            if page is None or time.time() - page_time(page) > 300:
                 page = self.node.fetch(url)
                 page.fetched_at = time.time()  # type: ignore[attr-defined]
                 self.cache[url] = page
-            except GorbError as e:
-                body = (f'<body style="font-family:monospace;padding:24px"><h2>No signal</h2>'
-                        f"<p>{html.escape(str(e))}</p><p>Check that a station hosting this "
-                        "domain is on the air and in range (or that a relay can reach it).</p></body>")
-                return self._send(504, body, csp=PAGE_CSP)
+            return page
+
+    def _media(self, url: str, preview: bool):
+        if not url.startswith("gorb://"):
+            return self._send(400, "bad url", "text/plain")
+        if preview:
+            url += ("&" if "?" in url else "?") + "gorb=preview"
+        try:
+            page = self._get(url)
+        except GorbError as e:
+            return self._send(504, str(e), "text/plain")
+        if page.status >= 400 or not page.content_type.startswith("image/"):
+            return self._send(404, "no picture", "text/plain")
+        self._send(200, page.body, page.content_type, cache="max-age=600")
+
+    def _frame(self, url: str, refresh: bool):
+        csp = self._csp()
+        try:
+            page = self._get(url, refresh)
+        except GorbError as e:
+            body = (f'<body style="font-family:monospace;padding:24px"><h2>No signal</h2>'
+                    f"<p>{html.escape(str(e))}</p><p>Check that a station hosting this "
+                    "domain is on the air and in range (or that a relay can reach it).</p></body>")
+            return self._send(504, body, csp=csp)
         foot = (f'<div style="font:12px monospace;color:#777;border-top:1px solid #ddd;margin-top:24px;'
                 f'padding:6px">received over radio &middot; {len(page.body)} bytes &middot; '
                 f"{page.hops} relay hop(s) &middot; {page.seconds:.1f}s</div>")
         if page.content_type == "text/html":
             body = rewrite_links(page.text, url) + foot
+        elif page.content_type.startswith("image/"):
+            src = html.escape("/media?url=" + quote(url, safe=""))
+            body = (f'<div style="text-align:center;padding:16px"><img src="{src}" '
+                    f'style="max-width:100%;image-rendering:auto"></div>{foot}')
         else:
             body = f"<pre>{html.escape(page.text)}</pre>{foot}"
-        self._send(200 if page.status < 400 else page.status, body, csp=PAGE_CSP)
+        self._send(200 if page.status < 400 else page.status, body, csp=csp)
 
     def _home(self) -> str:
         domains = self.node.known_domains()
@@ -205,7 +296,8 @@ def page_time(page: Page) -> float:
 
 
 def serve_browser(node: Node, host: str = "127.0.0.1", port: int = 8088) -> ThreadingHTTPServer:
-    handler = type("Handler", (_Handler,), {"node": node, "cache": {}})
+    handler = type("Handler", (_Handler,), {"node": node, "cache": {}, "url_locks": {},
+                                            "lock": threading.Lock()})
     server = ThreadingHTTPServer((host, port), handler)
     threading.Thread(target=server.serve_forever, daemon=True, name="gorb-browser").start()
     return server

@@ -56,6 +56,10 @@ def _add_radio_args(p: argparse.ArgumentParser) -> None:
                    help="don't relay for others (please don't: rule 2)")
     p.add_argument("--beacon", type=float, default=600.0, help="seconds between station IDs")
     p.add_argument("--ttl", type=int, default=3, help="max relay hops for your packets")
+    p.add_argument("--image-budget", type=int, default=6000,
+                   help="max bytes per picture you host (Gorb Pixels)")
+    p.add_argument("--motion-budget", type=int, default=24000,
+                   help="max bytes per video clip you host (Gorb Motion)")
     p.add_argument("-v", "--verbose", action="store_true")
 
 
@@ -91,7 +95,8 @@ def _sites(specs: list[str]) -> dict[str, str]:
 def _node(a, sites=None, relay=None) -> Node:
     return Node(_transport(a), a.callsign, sites,
                 relay=(not a.no_relay) if relay is None else relay,
-                beacon_interval=a.beacon, ttl=a.ttl).start()
+                beacon_interval=a.beacon, ttl=a.ttl, image_budget=a.image_budget,
+                motion_budget=a.motion_budget).start()
 
 
 def _wait_forever(node: Node) -> None:
@@ -180,6 +185,25 @@ def cmd_demo(a):
     except KeyboardInterrupt:
         for n in (host, relay, me):
             n.stop()
+
+
+def cmd_shrink(a):
+    """Squeeze a picture or video the way a host would (e.g. to upload to a board)."""
+    from . import media
+    src = Path(a.input)
+    try:
+        moving = src.suffix.lower() in media.VIDEO_EXTS or (
+            src.suffix.lower() == ".gif" and media._is_animated(src))
+        if a.preview:
+            data = media.motion_preview(str(src)) if moving else media.encode_preview(src.read_bytes())
+        elif moving:
+            data = media.encode_motion(str(src), a.budget or media.DEFAULT_MOTION_BUDGET)
+        else:
+            data = media.encode_image(src.read_bytes(), a.budget or media.DEFAULT_IMAGE_BUDGET)
+    except media.MediaError as e:
+        raise SystemExit(f"error: {e}")
+    Path(a.output).write_bytes(data)
+    print(f"{src.name}: {src.stat().st_size:,} bytes -> {a.output}: {len(data):,} bytes")
 
 
 def cmd_regions(a):
@@ -289,6 +313,13 @@ def main(argv=None):
     s.add_argument("--realtime", action="store_true")
     s.add_argument("-v", "--verbose", action="store_true")
     s.set_defaults(fn=cmd_demo)
+
+    s = sub.add_parser("shrink", help="squeeze a picture/video for radio (Gorb Pixels/Motion)")
+    s.add_argument("input")
+    s.add_argument("output", help="output file, use .webp")
+    s.add_argument("--budget", type=int, help="max bytes (default 6000 pictures, 24000 video)")
+    s.add_argument("--preview", action="store_true", help="make the tiny preview instead")
+    s.set_defaults(fn=cmd_shrink)
 
     s = sub.add_parser("regions", help="list G.O.R.B Small license-free band presets")
     s.set_defaults(fn=cmd_regions)

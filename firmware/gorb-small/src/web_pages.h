@@ -41,5 +41,52 @@ gap:14px;background:#0f1714;color:#7fa596;font:15px ui-monospace,Menlo,monospace
 <div class="w"><i></i><i></i><i></i><i></i><i></i></div>)HTML";
 
 static const char PAGE_CSP[] =
-    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; "
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data: http://192.168.4.1; font-src data:; "
     "form-action 'none'; base-uri 'none'";
+
+// "Add a picture" on the My site page. The phone shrinks the photo itself
+// (Gorb Pixels: WebP, or JPEG where the phone can't make WebP) to ~6 KB
+// before uploading, so the board never has to handle a big photo.
+static const char PICTURE_UPLOAD[] = R"HTML(
+<h3>Add a picture</h3>
+<p class="meta">Pick any photo. Your phone shrinks it to about 6 KB so it fits the radio.</p>
+<input type="file" id="pic" accept="image/*"> <button type="button" id="up">Shrink &amp; upload</button>
+<p id="upmsg" class="meta"></p>
+<script>
+async function shrink(file, budget) {
+  const img = await createImageBitmap(file);
+  for (let w = Math.min(640, img.width); w >= 32; w = Math.floor(w * 0.75)) {
+    const h = Math.max(1, Math.round(img.height * w / img.width));
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    c.getContext('2d').drawImage(img, 0, 0, w, h);
+    for (const type of ['image/webp', 'image/jpeg']) {
+      let lo = 0.05, hi = 0.9, best = null, ok = true;
+      for (let i = 0; i < 7 && ok; i++) {
+        const q = (lo + hi) / 2;
+        const b = await new Promise(r => c.toBlob(r, type, q));
+        if (!b || b.type !== type) { ok = false; break; }
+        if (b.size <= budget) { best = b; lo = q; } else { hi = q; }
+      }
+      if (best && (w <= 160 || lo > 0.3)) return best;  // prefer smaller-but-sharp
+    }
+  }
+  throw new Error('could not shrink this picture');
+}
+document.getElementById('up').onclick = async () => {
+  const msg = document.getElementById('upmsg');
+  const f = document.getElementById('pic').files[0];
+  if (!f) { msg.textContent = 'Pick a picture first.'; return; }
+  msg.textContent = 'Shrinking...';
+  try {
+    const b = await shrink(f, 6000);
+    const ext = b.type === 'image/webp' ? '.webp' : '.jpg';
+    const base = f.name.replace(/\.[^.]*$/, '').toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/^[-_]+/, '').slice(0, 30) || 'picture';
+    const fd = new FormData(); fd.append('file', b, base + ext);
+    msg.textContent = 'Uploading ' + b.size + ' bytes...';
+    const r = await fetch('/upload', { method: 'POST', body: fd });
+    msg.textContent = await r.text();
+    if (r.ok) setTimeout(() => location.reload(), 2500);
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+};
+</script>)HTML";

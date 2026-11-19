@@ -32,6 +32,11 @@ int main(int argc, char **argv) {
     std::cout << (t ? t : "ok");
   } else if (mode == "rewrite") {
     std::cout << gorb::rewriteLinks(in, argv[2]);
+  } else if (mode == "media") {  // video->img, then list images resolved against argv[2] argv[3]
+    std::string page = gorb::videoToImg(in);
+    std::cout << page << "\n";
+    for (auto &src : gorb::findImages(page))
+      std::cout << gorb::resolveUrl(argv[2], argv[3], src) << "\n";
   } else if (mode == "url") {
     std::string d, pa;
     std::cout << (gorb::parseUrl(in, d, pa) ? d + " " + pa : "bad");
