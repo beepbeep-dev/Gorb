@@ -31,6 +31,7 @@ class PacketType(IntEnum):
     DATA = 3  # one chunk of a response
     RESEND = 4  # "I'm missing these chunks": payload = comma separated seqs
     ERROR = 5  # request failed: payload = reason
+    WAIT = 6  # "still preparing your reply" (e.g. squeezing a video); keeps the requester waiting
 
 
 @dataclass(frozen=True)

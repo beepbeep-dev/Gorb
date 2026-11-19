@@ -57,9 +57,13 @@ def _add_radio_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--beacon", type=float, default=600.0, help="seconds between station IDs")
     p.add_argument("--ttl", type=int, default=3, help="max relay hops for your packets")
     p.add_argument("--image-budget", type=int, default=6000,
-                   help="max bytes per picture you host (Gorb Pixels)")
-    p.add_argument("--motion-budget", type=int, default=24000,
-                   help="max bytes per video clip you host (Gorb Motion)")
+                   help="max bytes for the standard version of each picture you host")
+    p.add_argument("--hd-budget", type=int, default=24000,
+                   help="max bytes for the sharp HD version of each picture (0 = no HD)")
+    p.add_argument("--motion-budget", type=int, default=40000,
+                   help="max bytes per video you host (Gorb Motion 2)")
+    p.add_argument("--no-echo", action="store_true",
+                   help="don't keep or share pages overheard on the air (Gorb Echo)")
     p.add_argument("-v", "--verbose", action="store_true")
 
 
@@ -96,7 +100,8 @@ def _node(a, sites=None, relay=None) -> Node:
     return Node(_transport(a), a.callsign, sites,
                 relay=(not a.no_relay) if relay is None else relay,
                 beacon_interval=a.beacon, ttl=a.ttl, image_budget=a.image_budget,
-                motion_budget=a.motion_budget).start()
+                motion_budget=a.motion_budget, hd_budget=a.hd_budget,
+                echo=not a.no_echo).start()
 
 
 def _wait_forever(node: Node) -> None:
@@ -192,14 +197,22 @@ def cmd_shrink(a):
     from . import media
     src = Path(a.input)
     try:
-        moving = src.suffix.lower() in media.VIDEO_EXTS or (
-            src.suffix.lower() == ".gif" and media._is_animated(src))
-        if a.preview:
-            data = media.motion_preview(str(src)) if moving else media.encode_preview(src.read_bytes())
-        elif moving:
-            data = media.encode_motion(str(src), a.budget or media.DEFAULT_MOTION_BUDGET)
+        if media.is_video(src):
+            if a.preview:
+                _, data = media.video_preview(str(src))
+            else:
+                codec = "h264" if Path(a.output).suffix.lower() == ".mp4" else "av1"
+                _, data = media.encode_video(str(src), codec, a.budget or media.DEFAULT_MOTION_BUDGET)
+        elif a.preview:
+            data = media.encode_preview(src.read_bytes())
+        elif src.suffix.lower() == ".gif" and media._is_animated(src):
+            data = media.encode_animation(str(src), a.budget or media.LITE_MOTION_BUDGET)
         else:
-            data = media.encode_image(src.read_bytes(), a.budget or media.DEFAULT_IMAGE_BUDGET)
+            ctype, data = media.encode_image(src.read_bytes(), a.budget or media.DEFAULT_IMAGE_BUDGET)
+            want = Path(a.output).suffix.lower().lstrip(".")
+            if want in ("avif", "webp") and not ctype.endswith(want):
+                _, data = media.encode_image(src.read_bytes(), a.budget or media.DEFAULT_IMAGE_BUDGET,
+                                             formats=(want,))
     except media.MediaError as e:
         raise SystemExit(f"error: {e}")
     Path(a.output).write_bytes(data)
@@ -316,8 +329,8 @@ def main(argv=None):
 
     s = sub.add_parser("shrink", help="squeeze a picture/video for radio (Gorb Pixels/Motion)")
     s.add_argument("input")
-    s.add_argument("output", help="output file, use .webp")
-    s.add_argument("--budget", type=int, help="max bytes (default 6000 pictures, 24000 video)")
+    s.add_argument("output", help="pictures: .avif or .webp; videos: .webm (AV1) or .mp4 (H.264)")
+    s.add_argument("--budget", type=int, help="max bytes (default 6000 pictures, 40000 video)")
     s.add_argument("--preview", action="store_true", help="make the tiny preview instead")
     s.set_defaults(fn=cmd_shrink)
 

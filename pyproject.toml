@@ -8,7 +8,7 @@ version = "0.1.0b0"
 description = "G.O.R.B - Global Open Radio Browser: send and receive web pages over radio"
 readme = "readme.md"
 requires-python = ">=3.9"
-dependencies = ["numpy", "pillow"]
+dependencies = ["numpy", "pillow>=11.3"]
 
 [project.optional-dependencies]
 radio = ["sounddevice", "pyserial"]

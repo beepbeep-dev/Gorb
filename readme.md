@@ -19,6 +19,11 @@ we use ai as I’m too lazy to sit down for 12 hours learn radio frequencies and
 
 ---
 
+<p align="center"><img src="assets/logo.png" alt="G.O.R.B - In GORB we speak, in GORB we use." width="520"></p>
+
+**New here? Read [Getting started](docs/GETTING-STARTED.md):** what you need,
+what to buy, and how to test an ESP32 even without a radio module.
+
 # Using G.O.R.B (v0.1 beta)
 
 G.O.R.B sends web pages as **sound**. A page is compressed, split into small
@@ -135,41 +140,36 @@ gorb browse --small EU868 --device /dev/ttyUSB0 --callsign my-station
 Flashing, supported boards and wiring: see [firmware/gorb-small](firmware/gorb-small/README.md).
 These presets are a starting point, not legal advice. Check your country's rules.
 
-# Pictures and video: Gorb Pixels and Gorb Motion
+# Pictures and video: Gorb Pixels 2, Gorb Motion 2 and Gorb Echo
 
-Radio is slow (about 1 KB/s on G.O.R.B Small, 0.1 KB/s on ham G.O.R.B), so a
-normal 2 MB photo would take half an hour. G.O.R.B never sends the original
-file. The host squeezes it to fit the radio first:
+Radio is slow, so G.O.R.B never sends the original file. How it sends pictures
+and video was decided by simulations in [the Gorb Lab](lab/README.md):
 
-* **Gorb Pixels (pictures):** each picture is re-encoded as WebP and shrunk
-  until it fits a byte budget (6 KB by default). The encoder searches for the
-  best quality and size that fit. The example photo goes from 334 KB to 6 KB.
-* **Instant previews:** each picture also gets a roughly 150-byte, 32-pixel
-  version. Your browser shows it blurred straight away, and the sharp picture
-  replaces it when it arrives. Hosts send short replies before long ones, so
-  previews (and pages) jump ahead of big pictures.
-* **Gorb Motion (video):** a `<video>` (or an animated GIF) becomes a short,
-  silent, looping clip of a few frames per second, at most 24 KB by default.
-  The 4-second example video becomes 12 KB.
+* **Gorb Pixels 2 (pictures)** come in three layers: a ~150-byte blurred
+  preview straight away, a 6 KB standard picture a few seconds later, then a
+  sharp 24 KB HD one. Pictures are AVIF (or WebP when that measures better for a
+  given picture), which needs about 23% fewer bytes than WebP for the same look.
+* **Gorb Motion 2 (video)** is real video with sound: AV1 + Opus, about 40 KB,
+  12 frames a second, with H.264 as a fallback for browsers without AV1. In the
+  lab it scored 0.88 against 0.75 for the old silent slideshow, at the same size.
+* **Gorb Echo**: radio is a broadcast, so every station keeps the pages and
+  pictures it overhears. If a neighbour already loaded something, you get it
+  instantly, and relays answer from their copy instead of asking the host again.
 
 Site makers don't do anything special: use normal `<img src="cat.jpg">` and
-`<video src="clip.mp4">` tags and G.O.R.B handles the rest. Hosts can change
-the budgets with `--image-budget` and `--motion-budget`. On ham radio, set them
-lower, since 6 KB takes about a minute at 1200 baud.
+`<video src="clip.mp4">` tags. Hosts can change the sizes with
+`--image-budget`, `--hd-budget` and `--motion-budget`. On ham radio or in Europe
+(EU868), use lighter settings such as `--hd-budget 0 --motion-budget 16000`.
 
 ```bash
-gorb shrink photo.jpg photo.webp
+gorb shrink photo.jpg photo.avif
 ```
 
-That shrinks a file by hand, the same way a host would. Video needs `ffmpeg` installed.
+That shrinks a file by hand, the same way a host would (video: `clip.webm` or
+`clip.mp4`). Video needs `ffmpeg` installed.
 
 On an ESP32 board, **My site → Add a picture** shrinks photos on your phone
-before uploading, so no computer is needed. The board's browser loads a page's
-pictures before showing it.
-
-Why not base64? Base64 turns 3 bytes into 4, which makes files a third
-*bigger*. G.O.R.B already sends raw bytes, so the savings come from encoding
-pictures smarter.
+before uploading, and the board's browser plays videos (as small H.264 clips).
 
 Rule 1 note: the content filter only reads text. Nobody checks pictures
 automatically, so hosts are responsible for what they post.
@@ -185,7 +185,7 @@ automatically, so hosts are responsible for what they post.
 | `gorb encode page.html out.wav` | turn a page into a sound file you can play into any radio |
 | `gorb decode in.wav` | turn a recording (e.g. from an SDR) back into the page |
 | `gorb demo` | host + relay + browser on the simulated band |
-| `gorb shrink in.jpg out.webp` | squeeze a picture or video for radio (Gorb Pixels/Motion) |
+| `gorb shrink in.jpg out.avif` | squeeze a picture or video for radio, the way hosts do |
 | `gorb regions` | list G.O.R.B Small license-free band presets |
 | `gorb esp32 --device PORT --small REGION` | set up an ESP32 board (e.g. as a standalone relay) |
 | `gorb --rules` | print the rules |
@@ -206,8 +206,7 @@ automatically, so hosts are responsible for what they post.
 ## Limits (it's a beta)
 
 * Slow: about 100 bytes per second at 1200 baud. Keep pages small; the
-  max is 64 KB after compression. Pictures and video are shrunk to fit (see above);
-  video has no sound yet.
+  max is 64 KB after compression. Pictures and video are shrunk to fit (see above).
 * Pages are shown with scripts turned off and no internet access.
 * Links to other `gorb://` sites and relative links work; `http(s)` links open
   on the normal web.
@@ -223,7 +222,10 @@ automatically, so hosts are responsible for what they post.
 | `gorb/browser.py` | the browser window |
 | `gorb/rules.py` | the rules and the content filter |
 | `gorb/small.py` | G.O.R.B Small: regions and the ESP32 serial link |
-| `gorb/media.py` | Gorb Pixels and Gorb Motion encoders |
+| `gorb/media.py` | Gorb Pixels 2 and Gorb Motion 2 encoders |
+| `gorb/branding.py`, `assets/` | the logo |
+| `lab/` | the Gorb Lab simulations behind the media formats |
+| `docs/GETTING-STARTED.md` | what you need, what to buy, how to set up |
 | `firmware/gorb-small/` | ESP32 LoRa firmware |
 
 Tests: `python -m unittest discover tests`

@@ -53,6 +53,7 @@ class Page:
     body: bytes
     hops: int = 0
     seconds: float = 0.0
+    from_echo: bool = False
 
     @property
     def text(self) -> str:
@@ -90,11 +91,20 @@ class Node:
         ttl: int = 3,
         image_budget: int = media.DEFAULT_IMAGE_BUDGET,
         motion_budget: int = media.DEFAULT_MOTION_BUDGET,
+        hd_budget: int = media.DEFAULT_HD_BUDGET,
+        echo: bool = True,
     ):
         if not CALLSIGN_RE.match(callsign):
             raise GorbError(f"bad callsign {callsign!r}")
         self.transport = transport
-        self.media = media.MediaCache(image_budget, motion_budget)
+        self.media = media.MediaCache(image_budget, motion_budget, hd_budget)
+        # Gorb Echo: keep what we overhear so neighbours (and we) get it free.
+        self.echo = echo
+        self._echo: OrderedDict[tuple[str, str], tuple[bytes, float]] = OrderedDict()
+        self._echo_bytes = 0
+        self._heard_gets: OrderedDict[tuple[str, int], tuple[str, str]] = OrderedDict()
+        self._overheard: dict[tuple[str, int], dict] = {}
+        self._answered: OrderedDict[tuple[str, int], bool] = OrderedDict()  # requests someone replied to
         self.callsign = callsign.upper()
         self.sites: dict[str, Path] = {}
         for domain, d in (site_dirs or {}).items():
@@ -108,11 +118,13 @@ class Node:
         self.ttl = ttl
 
         self.directory: dict[str, Station] = {}
-        self.stats = {"rx": 0, "tx": 0, "relayed": 0, "served": 0, "blocked": 0}
+        self.stats = {"rx": 0, "tx": 0, "relayed": 0, "served": 0, "blocked": 0,
+                      "echo_hits": 0, "echo_served": 0}
 
         self._seen: OrderedDict[tuple, int] = OrderedDict()  # key -> times heard
         self._pending: dict[int, _Pending] = {}
         self._responses: OrderedDict[tuple, tuple[list[bytes], float]] = OrderedDict()
+        self._building: set[tuple[str, int]] = set()
         self._lock = threading.RLock()
         # Small things go first: requests, relays and short replies (pages,
         # picture previews) jump ahead of long replies (full pictures, video).
@@ -128,6 +140,8 @@ class Node:
             # Tell the radio which packets are ours so it doesn't relay them.
             self.transport._names = [self.callsign, *self.sites]
         self.transport.start(self._on_frame)
+        if self.sites:
+            threading.Thread(target=self._prepare_media, daemon=True, name="gorb-media").start()
         threading.Thread(target=self._tx_loop, daemon=True, name="gorb-tx").start()
         if self.beacon_interval > 0:
             threading.Thread(target=self._beacon_loop, daemon=True, name="gorb-beacon").start()
@@ -206,6 +220,8 @@ class Node:
             return  # duplicate (another relay already repeated it)
         log.debug("RX %s %s->%s #%d seq=%d hops=%d", pkt.type.name, pkt.src, pkt.dst,
                   pkt.msg_id, pkt.seq, pkt.hops)
+        if self.echo:
+            self._echo_listen(pkt)
         for_me = self._handle(pkt)
         if self.relay and not for_me and pkt.ttl > 0:
             self._schedule_relay(pkt)
@@ -224,13 +240,122 @@ class Node:
         if t == PacketType.GET and pkt.dst in self.sites:
             self._serve(pkt)
             return True
-        if t == PacketType.RESEND and pkt.dst in self.sites:
+        if t == PacketType.RESEND and (pkt.dst in self.sites or (pkt.src, pkt.msg_id) in self._responses):
             self._resend(pkt)
             return True
-        if t in (PacketType.DATA, PacketType.ERROR) and pkt.dst == self.callsign:
+        if t == PacketType.GET and self.echo and self._echo_get(pkt.dst, self._payload_path(pkt)):
+            self._echo_answer(pkt)
+            return True  # answered from our echo: no need to pass the request on
+        if t in (PacketType.DATA, PacketType.ERROR, PacketType.WAIT) and pkt.dst == self.callsign:
             self._receive_response(pkt)
             return True
         return False
+
+    # ----------------------------------------------------------- Gorb Echo
+    # Radio is a broadcast: every station in range hears every reply, even
+    # ones meant for someone else. Echo keeps those overheard replies, so a
+    # page or picture somebody nearby already loaded costs no airtime again.
+    ECHO_TTL = 600.0  # seconds an overheard reply stays fresh
+    ECHO_MAX_BYTES = 8 * 1024 * 1024
+
+    @staticmethod
+    def _payload_path(pkt: Packet) -> str:
+        return pkt.payload.decode(errors="replace") or "/"
+
+    def _echo_get(self, domain: str, path: str) -> bytes | None:
+        with self._lock:
+            hit = self._echo.get((domain, path))
+            if hit and time.time() - hit[1] < self.ECHO_TTL:
+                self._echo.move_to_end((domain, path))
+                return hit[0]
+        return None
+
+    def _echo_store(self, domain: str, path: str, blob: bytes) -> None:
+        with self._lock:
+            old = self._echo.pop((domain, path), None)
+            if old:
+                self._echo_bytes -= len(old[0])
+            self._echo[(domain, path)] = (blob, time.time())
+            self._echo_bytes += len(blob)
+            while self._echo_bytes > self.ECHO_MAX_BYTES and self._echo:
+                _, (b, _) = self._echo.popitem(last=False)
+                self._echo_bytes -= len(b)
+
+    def _echo_listen(self, pkt: Packet) -> None:
+        """Collect replies we overhear (including ones addressed to others)."""
+        if pkt.type == PacketType.GET:
+            with self._lock:
+                self._heard_gets[(pkt.src, pkt.msg_id)] = (pkt.dst, self._payload_path(pkt))
+                while len(self._heard_gets) > 500:
+                    self._heard_gets.popitem(last=False)
+            return
+        if pkt.type != PacketType.DATA or not pkt.total:
+            return
+        key = (pkt.dst, pkt.msg_id)
+        with self._lock:
+            self._answered[key] = True
+            while len(self._answered) > 500:
+                self._answered.popitem(last=False)
+            req = self._heard_gets.get(key)
+            if req is None or req[0] != pkt.src:
+                return
+            o = self._overheard.setdefault(key, {"total": pkt.total, "chunks": {}, "t": time.time()})
+            o["chunks"][pkt.seq] = pkt.payload
+            if len(o["chunks"]) < o["total"]:
+                if len(self._overheard) > 50:  # forget the stalest half-heard replies
+                    for k in sorted(self._overheard, key=lambda k: self._overheard[k]["t"])[:10]:
+                        self._overheard.pop(k, None)
+                return
+            self._overheard.pop(key, None)
+        blob = b"".join(o["chunks"][i] for i in range(o["total"]))
+        try:
+            head = zlib.decompress(blob).partition(b"\n")[0]
+            if json.loads(head).get("status") != 200:
+                return
+        except (zlib.error, ValueError):
+            return
+        self._echo_store(req[0], req[1], blob)
+        log.debug("echo: kept %s%s (%d bytes)", req[0], req[1], len(blob))
+
+    def _echo_answer(self, pkt: Packet) -> None:
+        """Answer someone's request from what we overheard, unless the real
+        host turns out to be close enough to answer first."""
+        def go():
+            req = (pkt.src, pkt.msg_id)
+            with self._lock:
+                if req in self._answered or (req in self._responses and pkt.round == 0):
+                    return  # the host (or another echo) is already answering
+            blob = self._echo_get(pkt.dst, self._payload_path(pkt))
+            if blob is None:
+                return
+            size = self._chunk_size(pkt.dst, pkt.src)
+            chunks = [blob[i : i + size] for i in range(0, len(blob), size)] or [b""]
+            with self._lock:
+                self._responses[(pkt.src, pkt.msg_id)] = (chunks, time.time())
+            self.stats["echo_served"] += 1
+            log.info("echo: answering %s for %s%s from overheard copy", pkt.src, pkt.dst,
+                     self._payload_path(pkt))
+            self._send_chunks(pkt, chunks, range(len(chunks)), pkt.round)
+
+        delay = random.uniform(0.2, 0.5) + 3 * self.transport.airtime(CHUNK + 40)
+        threading.Timer(delay, go).start()
+
+    def _prepare_media(self) -> None:
+        """Squeeze every picture and video ahead of time so nobody waits on it."""
+        for domain, root in self.sites.items():
+            for f in sorted(root.rglob("*")):
+                if self._stop.is_set():
+                    return
+                if not f.is_file() or not media.is_media(f):
+                    continue
+                variants = media.VIDEO_VARIANTS if media.is_video(f) else media.IMAGE_VARIANTS
+                for v in variants:
+                    try:
+                        self.media.get(f, v)
+                    except media.MediaError as e:
+                        log.warning("can't prepare %s (%s): %s", f.name, v, e)
+                        break
+        log.info("pictures and videos ready")
 
     def _schedule_relay(self, pkt: Packet) -> None:
         # Rule 2: repeat packets for people who can't hear each other. Wait a
@@ -263,7 +388,10 @@ class Node:
             ).encode()
         elif media.is_media(target):
             # Gorb Pixels / Gorb Motion: shrink to fit the radio first.
-            variant = "preview" if "gorb=preview" in path.partition("?")[2] else "full"
+            query = dict(p.partition("=")[::2] for p in path.partition("?")[2].split("&") if p)
+            variant = query.get("gorb", "standard")
+            if variant not in media.IMAGE_VARIANTS + media.VIDEO_VARIANTS:
+                variant = "standard"
             try:
                 ctype, body = self.media.get(target, variant)
                 status = 200
@@ -295,7 +423,32 @@ class Node:
         key = (pkt.src, pkt.msg_id)
         with self._lock:
             cached = self._responses.get(key)
+            if cached is None:
+                if key in self._building:
+                    return  # already working on it (the requester asked again)
+                self._building.add(key)
         if cached is None:
+            # Build the reply off the radio thread: squeezing a video can take
+            # a while, and the station must keep listening meanwhile.
+            threading.Thread(target=self._serve_build, args=(pkt,), daemon=True).start()
+        else:
+            # The requester asked again: they heard nothing, so send it all again.
+            chunks, _ = cached
+            self._send_chunks(pkt, chunks, range(len(chunks)), pkt.round)
+
+    def _serve_build(self, pkt: Packet) -> None:
+        key = (pkt.src, pkt.msg_id)
+        done = threading.Event()
+
+        def keep_them_waiting():
+            n = 0
+            while not done.wait(2.0):
+                n += 1
+                self._send(Packet(PacketType.WAIT, pkt.dst, pkt.src, b"", pkt.msg_id, seq=n,
+                                  ttl=max(self.ttl, pkt.hops + 1)))
+
+        threading.Thread(target=keep_them_waiting, daemon=True).start()
+        try:
             blob = self._build_response(pkt.dst, pkt.payload.decode(errors="replace") or "/")
             size = self._chunk_size(pkt.dst, pkt.src)
             chunks = [blob[i : i + size] for i in range(0, len(blob), size)] or [b""]
@@ -306,11 +459,11 @@ class Node:
             self.stats["served"] += 1
             log.info("serving %s%s to %s (%d chunks)", pkt.dst,
                      pkt.payload.decode(errors="replace"), pkt.src, len(chunks))
-            self._send_chunks(pkt, chunks, range(len(chunks)), 0)
-        else:
-            # The requester asked again: they heard nothing, so send it all again.
-            chunks, _ = cached
             self._send_chunks(pkt, chunks, range(len(chunks)), pkt.round)
+        finally:
+            done.set()
+            with self._lock:
+                self._building.discard(key)
 
     def _resend(self, pkt: Packet) -> None:
         with self._lock:
@@ -345,6 +498,8 @@ class Node:
             if p is None or pkt.src != p.domain:
                 return
             p.last_activity = time.monotonic()
+            if pkt.type == PacketType.WAIT:
+                return  # host is still preparing it: keep waiting
             p.hops = max(p.hops, pkt.hops)
             if pkt.type == PacketType.ERROR:
                 p.error = pkt.payload.decode(errors="replace")
@@ -365,6 +520,13 @@ class Node:
 
         if len(path.encode()) > self._chunk_size(self.callsign, domain):
             raise GorbError("address too long to send over the radio")
+        if self.echo:
+            blob = self._echo_get(domain, path)
+            if blob is not None:  # someone nearby loaded it recently and we overheard it
+                self.stats["echo_hits"] += 1
+                page = self._decode_page(f"gorb://{domain}{path}", blob, 0, 0.0)
+                page.from_echo = True
+                return page
         msg_id = random.getrandbits(32)
         p = _Pending(domain, path)
         with self._lock:
@@ -413,8 +575,11 @@ class Node:
             if p.error:
                 raise GorbError(p.error)
             blob = b"".join(p.chunks[i] for i in range(p.total))
-            return self._decode_page(f"gorb://{domain}{path}", blob, p.hops,
+            page = self._decode_page(f"gorb://{domain}{path}", blob, p.hops,
                                      time.monotonic() - started)
+            if self.echo and page.status == 200:
+                self._echo_store(domain, path, blob)
+            return page
         finally:
             with self._lock:
                 self._pending.pop(msg_id, None)

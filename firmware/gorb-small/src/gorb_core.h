@@ -19,7 +19,7 @@
 namespace gorb {
 
 // ---------------------------------------------------------------- packets
-enum PacketType : uint8_t { BEACON = 1, GET = 2, DATA = 3, RESEND = 4, ERROR_PKT = 5 };
+enum PacketType : uint8_t { BEACON = 1, GET = 2, DATA = 3, RESEND = 4, ERROR_PKT = 5, WAIT = 6 };
 static const size_t HEAD_LEN = 15;
 static const size_t MAX_FRAME = 255;
 
@@ -437,9 +437,10 @@ inline std::string tagAttr(const std::string &html, size_t start, size_t end, co
   return "";
 }
 
-// Gorb Motion on the board: <video src=x>...</video> becomes <img src=x>,
-// since hosts send videos as short looping animated pictures.
-inline std::string videoToImg(const std::string &html) {
+// Gorb Motion 2 on the board: every <video> becomes a plain player that asks
+// the host for the "lite" version (H.264 + AAC, small enough for the board's
+// memory, and playable on every phone).
+inline std::string boardVideo(const std::string &html) {
   std::string out;
   size_t i = 0;
   while (i < html.size()) {
@@ -462,7 +463,13 @@ inline std::string videoToImg(const std::string &html) {
             break;
           }
       }
-      if (!src.empty()) out += "<img src=\"" + src + "\" alt=\"video clip\" style=\"max-width:100%\">";
+      if (!src.empty() && src.find("://") == std::string::npos) {
+        src += (src.find('?') == std::string::npos ? "?" : "&");
+        src += "gorb=lite";
+      }
+      if (!src.empty())
+        out += "<video controls playsinline preload=\"auto\" style=\"max-width:100%\" src=\"" + src +
+               "\"></video>";
       size_t closeEnd = html.find('>', close);
       i = closeEnd == std::string::npos ? html.size() : closeEnd + 1;
       continue;
@@ -472,18 +479,18 @@ inline std::string videoToImg(const std::string &html) {
   return out;
 }
 
-// src of every <img> (after videoToImg), in page order.
-inline std::vector<std::string> findImages(const std::string &html) {
+// src of every <img> and <video> (after boardVideo), in page order.
+inline std::vector<std::string> findMedia(const std::string &html) {
   std::vector<std::string> out;
   for (size_t i = 0; i < html.size(); i++) {
-    if (html[i] == '<' && startsWithAt(html, i + 1, "img") && i + 4 < html.size() &&
-        (html[i + 4] == ' ' || html[i + 4] == '\n')) {
-      size_t e = html.find('>', i);
-      if (e == std::string::npos) break;
-      std::string src = tagAttr(html, i, e, "src");
-      if (!src.empty()) out.push_back(src);
-      i = e;
-    }
+    if (html[i] != '<') continue;
+    size_t n = startsWithAt(html, i + 1, "img") ? 4 : startsWithAt(html, i + 1, "video") ? 6 : 0;
+    if (!n || i + n >= html.size() || (html[i + n] != ' ' && html[i + n] != '\n')) continue;
+    size_t e = html.find('>', i);
+    if (e == std::string::npos) break;
+    std::string src = tagAttr(html, i, e, "src");
+    if (!src.empty()) out.push_back(src);
+    i = e;
   }
   return out;
 }

@@ -1,8 +1,11 @@
-"""Gorb Pixels / Gorb Motion tests."""
+"""Gorb Pixels 2, Gorb Motion 2 and Gorb Echo tests."""
 
 import io
+import json
 import shutil
+import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -13,25 +16,45 @@ from gorb.node import Node
 from gorb.transport import SimTransport
 
 try:
-    import PIL  # noqa: F401
     from PIL import Image
 except ImportError:  # pragma: no cover
     Image = None
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples" / "site" / "media"
+HAVE_VIDEO = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+
+
+def probe(data: bytes, suffix: str) -> dict:
+    with tempfile.NamedTemporaryFile(suffix=suffix) as f:
+        f.write(data)
+        f.flush()
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                            "stream=codec_type,codec_name:format=duration", "-of", "json", f.name],
+                           capture_output=True, text=True, check=True)
+    return json.loads(r.stdout)
 
 
 @unittest.skipUnless(Image, "Pillow not installed")
-class EncodeTest(unittest.TestCase):
+class PixelsTest(unittest.TestCase):
     def test_photo_fits_budget(self):
         data = (EXAMPLES / "tower.jpg").read_bytes()
-        for budget in (1500, 6000, 20000):
-            out = media.encode_image(data, budget)
+        for budget in (2000, 6000, 24000):
+            ctype, out = media.encode_image(data, budget)
             self.assertLessEqual(len(out), budget)
-            self.assertEqual(Image.open(io.BytesIO(out)).format, "WEBP")
-        big = Image.open(io.BytesIO(media.encode_image(data, 20000)))
-        small = Image.open(io.BytesIO(media.encode_image(data, 1500)))
-        self.assertGreaterEqual(big.width, small.width)
+            self.assertIn(ctype, ("image/avif", "image/webp"))
+            Image.open(io.BytesIO(out)).load()
+
+    def test_more_bytes_look_better(self):
+        data = (EXAMPLES / "tower.jpg").read_bytes()
+        ref = Image.open(io.BytesIO(data)).convert("RGB")
+        small = Image.open(io.BytesIO(media.encode_image(data, 2000)[1])).convert("RGB")
+        big = Image.open(io.BytesIO(media.encode_image(data, 24000, max_width=1280)[1])).convert("RGB")
+        self.assertGreater(media.ssim(ref, big), media.ssim(ref, small))
+
+    def test_ssim(self):
+        im = Image.open(EXAMPLES / "tower.jpg").convert("RGB")
+        self.assertAlmostEqual(media.ssim(im, im), 1.0, places=5)
+        self.assertLess(media.ssim(im, im.rotate(180)), 0.6)
 
     def test_preview_is_tiny(self):
         out = media.encode_preview((EXAMPLES / "tower.jpg").read_bytes())
@@ -47,51 +70,83 @@ class EncodeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             gif = Path(d) / "a.gif"
             frames[0].save(gif, save_all=True, append_images=frames[1:], duration=100, loop=0)
-            out = media.encode_motion(str(gif), 8000)
-        clip = Image.open(io.BytesIO(out))
+            out = media.encode_animation(str(gif), 8000)
         self.assertLessEqual(len(out), 8000)
-        self.assertGreater(clip.n_frames, 1)
+        self.assertGreater(Image.open(io.BytesIO(out)).n_frames, 1)
 
-    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")
-    def test_video(self):
-        out = media.encode_motion(str(EXAMPLES / "waves.mp4"), 15000)
-        clip = Image.open(io.BytesIO(out))
-        self.assertLessEqual(len(out), 15000)
-        self.assertGreater(clip.n_frames, 4)
-        self.assertLess(len(media.motion_preview(str(EXAMPLES / "waves.mp4"))), 600)
+
+@unittest.skipUnless(Image and HAVE_VIDEO, "needs Pillow and ffmpeg")
+class MotionTest(unittest.TestCase):
+    def test_av1_with_sound(self):
+        ctype, out = media.encode_video(str(EXAMPLES / "waves.mp4"), "av1", 20000)
+        self.assertEqual(ctype, "video/webm")
+        self.assertLessEqual(len(out), 20000)
+        streams = {s["codec_type"]: s["codec_name"] for s in probe(out, ".webm")["streams"]}
+        self.assertEqual(streams.get("video"), "av1")
+
+    def test_h264_and_lite(self):
+        ctype, out = media.encode_video(str(EXAMPLES / "waves.mp4"), "h264", 30000)
+        self.assertEqual(ctype, "video/mp4")
+        self.assertLessEqual(len(out), 30000)
+        self.assertEqual(probe(out, ".mp4")["streams"][0]["codec_name"], "h264")
+
+    def test_long_videos_are_cut_not_mushed(self):
+        plan = media.video_plan(40000, 600, True, "av1")
+        self.assertLess(plan["seconds"], 30)
+        self.assertGreaterEqual(plan["vkbps"], media.MIN_VIDEO_KBPS - 0.01)
+        short = media.video_plan(40000, 5, True, "av1")
+        self.assertEqual(short["seconds"], 5)
+        self.assertGreater(short["width"], plan["width"])
+
+    def test_poster(self):
+        ctype, poster = media.video_preview(str(EXAMPLES / "waves.mp4"))
+        self.assertTrue(ctype.startswith("image/"))
+        self.assertLessEqual(len(poster), media.POSTER_BUDGET)
 
 
 class RewriteTest(unittest.TestCase):
-    def test_pictures_and_video(self):
-        out = rewrite_links('<img src="pic.jpg" style="border:0" alt="x">'
-                            '<video controls width="300"><source src="clip.mp4"></video>'
-                            '<a href="other.html">o</a>', "gorb://cats.gorb/blog/index.html")
-        self.assertIn('src="/media?url=gorb%3A%2F%2Fcats.gorb%2Fblog%2Fpic.jpg"', out)
-        self.assertIn("v=preview", out)  # blurry stand-in behind the picture
+    def test_picture_layers(self):
+        out = rewrite_links('<img src="pic.jpg" style="border:0" alt="x">',
+                            "gorb://cats.gorb/blog/index.html")
+        u = "/media?url=gorb%3A%2F%2Fcats.gorb%2Fblog%2Fpic.jpg"
+        self.assertIn(f'src="{u}&amp;v=hd"', out)
+        # standard picture stacked above the preview, behind the HD one
+        self.assertLess(out.index(f"{u}&amp;v=standard"), out.index(f"{u}&amp;v=preview"))
         self.assertIn("border:0", out)
-        self.assertNotIn("<video", out)
-        self.assertIn("clip.mp4", out)
-        self.assertIn('/go?url=gorb%3A%2F%2Fcats.gorb%2Fblog%2Fother.html', out)
+
+    def test_video_becomes_player_with_fallback(self):
+        out = rewrite_links('<video width="300"><source src="clip.mp4"></video><a href="o.html">o</a>',
+                            "gorb://cats.gorb/")
+        self.assertIn("<video controls", out)
+        self.assertIn("v=av1", out)
+        self.assertIn("v=h264", out)
+        self.assertLess(out.index("v=av1"), out.index("v=h264"))
+        self.assertIn("v=preview", out)  # poster
+        self.assertIn('width="300"', out)
+        self.assertIn("/go?url=gorb%3A%2F%2Fcats.gorb%2Fo.html", out)
 
 
 @unittest.skipUnless(Image, "Pillow not installed")
 class HostMediaTest(unittest.TestCase):
-    def test_host_sends_shrunk_picture_and_preview(self):
+    def test_host_sends_each_layer(self):
         with tempfile.TemporaryDirectory() as d:
             shutil.copy(EXAMPLES / "tower.jpg", d)
-            host = Node(SimTransport(90, 0, 0, 10), "HOST-9", {"pics.gorb": d},
-                        beacon_interval=0, image_budget=4000).start()
-            me = Node(SimTransport(90, 5, 0, 10), "ME-9", beacon_interval=0).start()
+            host = Node(SimTransport(90, 0, 0, 10), "HOST-9", {"pics.gorb": d}, beacon_interval=0,
+                        image_budget=4000, hd_budget=12000).start()
+            me = Node(SimTransport(90, 5, 0, 10), "ME-9", beacon_interval=0, echo=False).start()
             try:
-                full = me.fetch("gorb://pics.gorb/tower.jpg", timeout=30)
-                prev = me.fetch("gorb://pics.gorb/tower.jpg?gorb=preview", timeout=30)
+                std = me.fetch("gorb://pics.gorb/tower.jpg", timeout=60)
+                hd = me.fetch("gorb://pics.gorb/tower.jpg?gorb=hd", timeout=60)
+                prev = me.fetch("gorb://pics.gorb/tower.jpg?gorb=preview", timeout=60)
             finally:
                 host.stop()
                 me.stop()
-        self.assertEqual((full.status, full.content_type), (200, "image/webp"))
-        self.assertLessEqual(len(full.body), 4000)
+        self.assertEqual(std.status, 200)
+        self.assertTrue(std.content_type.startswith("image/"))
+        self.assertLessEqual(len(std.body), 4000)
+        self.assertLessEqual(len(hd.body), 12000)
+        self.assertGreater(len(hd.body), len(std.body))
         self.assertLess(len(prev.body), 600)
-        self.assertEqual(Image.open(io.BytesIO(full.body)).format, "WEBP")
 
     def test_small_replies_go_first(self):
         """A preview asked for after a big picture still arrives first."""
@@ -103,7 +158,6 @@ class HostMediaTest(unittest.TestCase):
             host.media.get(Path(d) / "tower.jpg", "preview")
             me = Node(SimTransport(91, 5, 0, 10, realtime=True), "ME-8", beacon_interval=0).start()
             done = {}
-            import threading
 
             def get(name, url):
                 me.fetch(url, timeout=120)
@@ -122,6 +176,63 @@ class HostMediaTest(unittest.TestCase):
                 host.stop()
                 me.stop()
         self.assertLess(done["preview"], done["full"])
+
+
+class EchoTest(unittest.TestCase):
+    """Gorb Echo: replies overheard on the air are kept and reused."""
+
+    _ch = 120
+
+    def setUp(self):
+        EchoTest._ch += 1
+        self.dir = tempfile.TemporaryDirectory()
+        (Path(self.dir.name) / "index.html").write_text("<h1>news</h1>" + "x" * 3000)
+        self.nodes = []
+
+    def tearDown(self):
+        for n in self.nodes:
+            n.stop()
+        self.dir.cleanup()
+
+    def node(self, name, x, **kw):
+        n = Node(SimTransport(self._ch, x, 0, 10), name, beacon_interval=0, **kw).start()
+        self.nodes.append(n)
+        return n
+
+    def test_neighbour_gets_overheard_page_instantly(self):
+        host = self.node("HOST-1", 0, site_dirs={"news.gorb": self.dir.name})
+        alice = self.node("ALICE", 5)
+        bob = self.node("BOB-1", 5)
+        alice.fetch("gorb://news.gorb/", timeout=30)
+        time.sleep(0.3)
+        tx_before = host.stats["tx"] + bob.stats["tx"]
+        page = bob.fetch("gorb://news.gorb/", timeout=30)
+        self.assertTrue(page.from_echo)
+        self.assertTrue(page.text.startswith("<h1>news</h1>"))
+        self.assertEqual(host.stats["served"], 1)
+        self.assertEqual(host.stats["tx"] + bob.stats["tx"], tx_before)  # no airtime at all
+
+    def test_relay_answers_from_echo(self):
+        host = self.node("HOST-1", 0, site_dirs={"news.gorb": self.dir.name})
+        relay = self.node("RELAY-1", 8)
+        alice = self.node("ALICE", 16)
+        alice.fetch("gorb://news.gorb/", timeout=30)
+        time.sleep(0.5)
+        carol = self.node("CAROL", 16)  # arrives later, heard nothing
+        page = carol.fetch("gorb://news.gorb/", timeout=30)
+        self.assertTrue(page.text.startswith("<h1>news</h1>"))
+        self.assertFalse(page.from_echo)
+        self.assertEqual(host.stats["served"], 1)  # the host was never asked again
+        self.assertEqual(relay.stats["echo_served"], 1)
+
+    def test_echo_can_be_switched_off(self):
+        host = self.node("HOST-1", 0, site_dirs={"news.gorb": self.dir.name})
+        alice = self.node("ALICE", 5)
+        bob = self.node("BOB-1", 5, echo=False)
+        alice.fetch("gorb://news.gorb/", timeout=30)
+        page = bob.fetch("gorb://news.gorb/", timeout=30)
+        self.assertFalse(page.from_echo)
+        self.assertEqual(host.stats["served"], 2)
 
 
 if __name__ == "__main__":

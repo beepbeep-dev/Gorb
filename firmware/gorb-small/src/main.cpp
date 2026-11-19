@@ -618,6 +618,10 @@ static bool isPicture(const std::string &ctype) {
   return ctype.compare(0, 6, "image/") == 0 && ctype != "image/svg+xml";
 }
 
+static bool isMedia(const std::string &ctype) {
+  return isPicture(ctype) || ctype.compare(0, 6, "video/") == 0;
+}
+
 // After a page arrives, its pictures are fetched one by one before the page
 // is shown, so it appears complete.
 static std::string mediaFor;  // page whose pictures are loading
@@ -634,7 +638,7 @@ static void queueMedia(const std::string &url, const std::string &html) {
   mediaInFlight.clear();
   mediaFailed.clear();
   mediaDone = 0;
-  for (auto &src : gorb::findImages(gorb::videoToImg(html))) {
+  for (auto &src : gorb::findMedia(gorb::boardVideo(html))) {
     std::string u = gorb::resolveUrl(domain, path, src);
     if (u.empty() || cacheFind(u)) continue;
     bool dup = false;
@@ -695,7 +699,7 @@ static void finishPage(const std::string &url, int status, std::string ctype, st
   p.hops = hops;
   p.secs = secs;
   p.at = millis();
-  if (isPicture(p.ctype)) {
+  if (isMedia(p.ctype)) {
     if (p.status < 400) mediaPut(std::move(p));
     return;
   }
@@ -767,6 +771,7 @@ static void completeFetch() {
 static void fetchReceive(const gorb::Packet &pk) {
   if (!fetchState.active || pk.msgId != fetchState.msgId || pk.src != fetchState.domain) return;
   fetchState.lastAct = millis();
+  if (pk.type == gorb::WAIT) return;  // host is still preparing it: keep waiting
   if (pk.hops > fetchState.hops) fetchState.hops = pk.hops;
   if (pk.type == gorb::ERROR_PKT) {
     fetchFail(std::string(pk.payload.begin(), pk.payload.end()));
@@ -894,7 +899,8 @@ static void handleRadioPacket() {
   } else if ((pk.type == gorb::GET || pk.type == gorb::RESEND) && !myDomain.empty() &&
              pk.dst == myDomain) {
     hostRequest(pk);
-  } else if ((pk.type == gorb::DATA || pk.type == gorb::ERROR_PKT) && pk.dst == stationName) {
+  } else if ((pk.type == gorb::DATA || pk.type == gorb::ERROR_PKT || pk.type == gorb::WAIT) &&
+             pk.dst == stationName) {
     fetchReceive(pk);
   }
 
@@ -1072,7 +1078,7 @@ static std::string urlDecode(const std::string &s) {
 }
 
 static std::string topBar(const std::string &url) {
-  std::string s = "<header><a class=\"logo\" href=\"/\">G.O.R.B</a>"
+  std::string s = std::string("<header><a class=\"logo\" href=\"/\">") + ICON_SVG + "G.O.R.B</a>"
                   "<form class=\"bar\" action=\"/go\"><input name=\"url\" value=\"" +
                   esc(url) +
                   "\" placeholder=\"gorb://example.gorb\" autocapitalize=\"off\">"
@@ -1091,7 +1097,7 @@ static void sendHtml(int code, const std::string &body) {
 }
 
 static void handleHome() {
-  std::string b = topBar("") + "<div class=\"wrap\"><h1>Global Open Radio Browser</h1>";
+  std::string b = topBar("") + "<div class=\"wrap\">" + LOGO_SVG;
   if (!region)
     b += "<div class=\"note\">Pick your region in <a href=\"/settings\">Settings</a> before "
          "this board can use the radio.</div>";
@@ -1146,6 +1152,8 @@ static void handlePage(const std::string &rest) {
   size_t slash = rest.find('/');
   std::string domain = rest.substr(0, slash);
   std::string path = slash == std::string::npos ? "/" : rest.substr(slash);
+  if (server.hasArg("gorb"))  // which version of a picture/video (e.g. "lite")
+    path += "?gorb=" + std::string(server.arg("gorb").c_str());
   std::string d2, p2;
   if (!gorb::parseUrl(domain + path, d2, p2)) {
     server.send(400, "text/plain", "bad address");
@@ -1157,11 +1165,34 @@ static void handlePage(const std::string &rest) {
   server.sendHeader("Cache-Control", "no-store");
 
   CachedPage *page = retry ? nullptr : cacheFind(url);
-  if (page && isPicture(page->ctype)) {  // a picture on a page (or opened directly)
+  if (page && isMedia(page->ctype)) {  // a picture or video on a page (or opened directly)
+    const std::string &body = page->body;
+    size_t start = 0, end = body.empty() ? 0 : body.size() - 1;
+    String range = server.header("Range");  // video players ask for byte ranges
+    bool partial = range.startsWith("bytes=") && !body.empty();
+    if (partial) {
+      int dash = range.indexOf('-');
+      String a = range.substring(6, dash), b = range.substring(dash + 1);
+      if (a.length()) {
+        start = a.toInt();
+        if (b.length()) end = std::min<size_t>(b.toInt(), body.size() - 1);
+      } else if (b.length()) {
+        start = body.size() - std::min<size_t>(b.toInt(), body.size());
+      }
+      if (start > end) {
+        server.sendHeader("Content-Range", S("bytes */" + std::to_string(body.size())));
+        server.send(416, "text/plain", "");
+        return;
+      }
+      server.sendHeader("Content-Range", S("bytes " + std::to_string(start) + "-" +
+                                           std::to_string(end) + "/" + std::to_string(body.size())));
+    }
+    server.sendHeader("Accept-Ranges", "bytes");
     server.sendHeader("Cache-Control", "max-age=600", true);
-    server.setContentLength(page->body.size());
-    server.send(200, S(page->ctype), "");
-    server.sendContent(page->body.data(), page->body.size());
+    size_t len = body.empty() ? 0 : end - start + 1;
+    server.setContentLength(len);
+    server.send(partial ? 206 : 200, S(page->ctype), "");
+    if (len) server.sendContent(body.data() + start, len);
     return;
   }
   if (!page) {
@@ -1186,7 +1217,7 @@ static void handlePage(const std::string &rest) {
   }
   if (page) {
     std::string body = page->ctype == "text/html"
-                           ? gorb::rewriteLinks(gorb::videoToImg(page->body), d2)
+                           ? gorb::rewriteLinks(gorb::boardVideo(page->body), d2)
                            : "<pre>" + esc(page->body) + "</pre>";
     char foot[200];
     snprintf(foot, sizeof(foot),
@@ -1474,6 +1505,8 @@ void setup() {
   server.on("/site", handleSite);
   server.on("/upload", HTTP_POST, handleUploadDone, handleUploadChunk);
   server.onNotFound(handleNotFound);
+  static const char *wanted[] = {"Range"};
+  server.collectHeaders(wanted, 1);
   server.begin();
 
   lastBeacon = millis() - BEACON_MS + random(3000, 8000);  // first beacon a few seconds in

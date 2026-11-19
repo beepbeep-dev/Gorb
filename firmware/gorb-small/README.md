@@ -31,7 +31,7 @@ own board.
 Pictures: in **My site → Add a picture**, pick any photo. Your phone shrinks
 it to about 6 KB before uploading, then you put it on a page with
 `<img src="name.webp">`. Pages with pictures show up once their pictures
-have arrived. Videos from computer hosts play as short silent clips.
+have arrived. Videos from computer hosts play with sound, as small H.264 clips.
 
 Speeds: a 1 KB page takes a few seconds; pages hosted on a board are sent
 uncompressed and capped at 32 KB.
@@ -53,6 +53,12 @@ Wiring for `esp32_rfm95` (ESP32 pin → RFM95W pin): 18→SCK, 19→MISO, 23→M
 5→NSS, 14→RESET, 2→DIO0, 4→DIO1, 3V3→3.3V, GND→GND.
 
 ## Flash it
+
+**Easiest, no installs:** open https://espressif.github.io/esptool-js/ in
+Chrome or Edge, connect the board, add the file for your board from
+[`prebuilt/`](prebuilt/README.md) at address **0x0**, and click Program.
+
+**Or build it yourself:**
 
 Install [PlatformIO](https://platformio.org/install/cli), plug in the board, then:
 

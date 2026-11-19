@@ -83,10 +83,12 @@ class FirmwareCoreTest(unittest.TestCase):
                 b'<video controls width="300"><source src="../clips/c.mp4"></video>'
                 b'<img src="https://example.com/x.png"><img src="gorb://dogs.gorb/d.png">')
         out = self.run_exe("media", "cats.gorb", "/blog/post.html", data=page)[1].decode().split("\n")
-        self.assertNotIn("<video", out[0])
-        self.assertIn('<img src="../clips/c.mp4"', out[0])
+        self.assertIn('<video controls playsinline preload="auto" style="max-width:100%" '
+                      'src="../clips/c.mp4?gorb=lite"></video>', out[0])
+        self.assertNotIn("<source", out[0])
         self.assertEqual(out[1:6], ["gorb://cats.gorb/blog/a.webp", "gorb://cats.gorb/pics/b.jpg",
-                                    "gorb://cats.gorb/clips/c.mp4", "", "gorb://dogs.gorb/d.png"])
+                                    "gorb://cats.gorb/clips/c.mp4?gorb=lite", "",
+                                    "gorb://dogs.gorb/d.png"])
 
 
 if __name__ == "__main__":

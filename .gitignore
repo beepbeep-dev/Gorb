@@ -4,3 +4,4 @@ __pycache__/
 build/
 dist/
 *.wav
+lab/results/test-clip-original.mp4
