@@ -135,6 +135,7 @@ class Node:
         self._unsent: dict[tuple[str, int], set[int]] = {}
         self._paced: set[tuple[str, int]] = set()  # requests that came through a relay
         self._cancelled: OrderedDict[tuple[str, int], bool] = OrderedDict()  # requester has it
+        self._echo_answering: set[tuple[str, int]] = set()  # requests we answer from Echo
         self._lock = threading.RLock()
         # Small things go first: requests, relays and short replies (pages,
         # picture previews) jump ahead of long replies (full pictures, video).
@@ -176,6 +177,9 @@ class Node:
                 _, _, pkt = self._txq.get(timeout=0.5)
             except queue.Empty:
                 continue
+            if pkt.type == PacketType.DATA and (pkt.dst, pkt.msg_id) in self._echo_answering \
+                    and (pkt.dst, pkt.msg_id) in self._answered:
+                continue  # another station is already answering them from its copy
             if pkt.type == PacketType.DATA and (pkt.dst, pkt.msg_id) in self._cancelled:
                 with self._lock:
                     left = self._unsent.get((pkt.dst, pkt.msg_id))
@@ -213,7 +217,9 @@ class Node:
                 if paced:
                     # The reply goes through a relay, which can only repeat it
                     # in the gaps between our packets: leave it some room.
-                    time.sleep(max(0.3, 2 * air))
+                    # Scale with airtime (LoRa ~0.3 s): a fixed minimum would add ~10 s
+                    # per page on fast radios like ESP-NOW (radio lab finding).
+                    time.sleep(2 * air)
             log.debug("TX %s %s->%s #%d seq=%d", pkt.type.name, pkt.src, pkt.dst, pkt.msg_id, pkt.seq)
 
     def _beacon_loop(self) -> None:
@@ -376,11 +382,13 @@ class Node:
             with self._lock:
                 self._responses[(pkt.src, pkt.msg_id)] = (chunks, time.time())
             self.stats["echo_served"] += 1
+            with self._lock:
+                self._echo_answering.add(req)
             log.info("echo: answering %s for %s%s from overheard copy", pkt.src, pkt.dst,
                      self._payload_path(pkt))
             self._send_chunks(pkt, chunks, range(len(chunks)), pkt.round)
 
-        delay = random.uniform(0.2, 0.5) + 3 * self.transport.airtime(CHUNK + 40)
+        delay = random.uniform(0.2, 1.2) + 3 * self.transport.airtime(CHUNK + 40)
         threading.Timer(delay, go).start()
 
     def _prepare_media(self) -> None:

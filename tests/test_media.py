@@ -223,7 +223,9 @@ class EchoTest(unittest.TestCase):
         self.assertTrue(page.text.startswith("<h1>news</h1>"))
         self.assertFalse(page.from_echo)
         self.assertEqual(host.stats["served"], 1)  # the host was never asked again
-        self.assertEqual(relay.stats["echo_served"], 1)
+        # A neighbour with a saved copy answered: the relay, or Alice, who
+        # loaded it earlier right next to Carol (whoever is quicker).
+        self.assertEqual(relay.stats["echo_served"] + alice.stats["echo_served"], 1)
 
     def test_crowd_loading_same_page(self):
         """Five people ask for the same page at once over a slow radio. Before

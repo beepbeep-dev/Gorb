@@ -1,0 +1,271 @@
+# Self-checks
+
+## LoRa airtime (Semtech formula) vs. published calculator values
+
+| mode | payload bytes | expected ms | lab ms |
+|---|---|---|---|
+| SF7/125k | 20 | 56.6 | 56.6 |
+| SF12/125k | 20 | 1318.9 | 1318.9 |
+| SF9/125k | 20 | 185.3 | 185.3 |
+| SF10/125k | 51 | 616.4 | 616.4 |
+| LoRa SF8/500k (Gorb) | 215 | - | 151.2 |
+| LoRa SF8/250k (Gorb) | 215 | - | 302.3 |
+
+## Pure ALOHA throughput (20 senders, no capture, no carrier sense)
+
+| offered load G | lab S | theory G·e^-2G |
+|---|---|---|
+| 0.1 | 0.079 | 0.082 |
+| 0.25 | 0.156 | 0.152 |
+| 0.5 | 0.186 | 0.184 |
+| 0.75 | 0.169 | 0.167 |
+| 1.0 | 0.141 | 0.135 |
+| 1.5 | 0.088 | 0.075 |
+| 2.0 | 0.046 | 0.037 |
+
+With carrier sense (CAD) on: G=0.25: S=0.234, G=0.5: S=0.435, G=1.0: S=0.647, G=2.0: S=0.66
+
+## Modes: sensitivity and median range (path-loss exponent 3.3, no shadowing)
+
+| mode | sensitivity dBm | kbit/s | airtime of a 215-byte frame (ms) | outdoor-outdoor m | one end indoors m | both indoors m |
+|---|---|---|---|---|---|---|
+| LoRa SF7/125k | -123.5 | 5.5 | 338.18 | 3243 | 1614 | 803 |
+| LoRa SF12/125k | -136.0 | 0.3 | 7708.67 | 7757 | 3861 | 1922 |
+| LoRa SF5/500k | -112.5 | 62.5 | 29.26 | 1503 | 748 | 372 |
+| LoRa SF7/500k | -117.5 | 21.9 | 84.54 | 2131 | 1060 | 528 |
+| LoRa SF8/500k | -120.0 | 12.5 | 151.17 | 2537 | 1262 | 628 |
+| LoRa SF8/250k | -123.0 | 6.2 | 302.34 | 3129 | 1558 | 775 |
+| Wi-Fi LR 250k | -104.0 | 250.0 | 8.64 | 347 | 140 | 57 |
+| Wi-Fi LR 500k | -101.0 | 500.0 | 4.51 | 281 | 114 | 46 |
+| ESP-NOW 1M | -97.0 | 1000.0 | 2.26 | 213 | 86 | 35 |
+| ESP-NOW 11M | -88.0 | 11000.0 | 0.38 | 114 | 46 | 19 |
+| ESP-NOW 54M | -74.0 | 54000.0 | 0.07 | 28 | 11 | 5 |
+running 2000 simulations on 4 processes ...
+done in 508 s
+# Idea 1/2: how relays repeat packets (LoRa-only suburb)
+
+20 random seeds per row; mean ± standard deviation across seeds.
+Load time = median over the loads that finished (failures excluded); 'within 60 s' = share of all loads finished within 60 s.
+
+## suburb1: 1 load of a 6 KB page
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| today's Gorb (flood, node.py fixes) | 95% ±22 | 64.2 ±19.5 | 30% | 94 ±47 | 0.0 ±0.0 | 38 ±19 |
+| Gorb v0.1 flood (before fixes) | 75% ±43 | 76.6 ±14.0 | 10% | 197 ±39 | 0.0 ±0.0 | 79 ±16 |
+| RSSI timer (Meshtastic-like) | 95% ±22 | 60.8 ±17.7 | 25% | 79 ±34 | 0.0 ±0.0 | 31 ±13 |
+| gradient (ETX, closest first) | 95% ±22 | 46.4 ±10.9 | 80% | 38 ±16 | 0.0 ±0.0 | 15 ±6 |
+| route (unicast reverse path) | 95% ±22 | 42.6 ±19.5 | 65% | 34 ±26 | 0.0 ±0.0 | 14 ±10 |
+| CT flood (Glossy-style) | 100% ±0 | 22.0 ±2.3 | 100% | 303 ±3 | 0.0 ±0.0 | 121 ±1 |
+| CT flood, pipelined (3 slots) | 100% ±0 | 33.6 ±11.6 | 100% | 298 ±13 | 0.0 ±0.0 | 119 ±5 |
+| route + host pacing | 90% ±30 | 41.9 ±20.8 | 60% | 38 ±28 | 0.0 ±0.0 | 15 ±11 |
+
+## suburb4: 4 loads of 6 KB pages within 20 s
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| today's Gorb (flood, node.py fixes) | 9% ±14 | 75.4 ±13.5 | 1% | 267 ±59 | 0.0 ±0.0 | 107 ±23 |
+| Gorb v0.1 flood (before fixes) | 5% ±13 | 81.7 ±9.8 | 0% | 314 ±71 | 0.0 ±0.0 | 126 ±28 |
+| RSSI timer (Meshtastic-like) | 5% ±13 | 76.4 ±18.6 | 1% | 273 ±54 | 0.0 ±0.0 | 109 ±21 |
+| gradient (ETX, closest first) | 26% ±29 | 75.9 ±16.5 | 8% | 216 ±31 | 0.0 ±0.0 | 86 ±12 |
+| route (unicast reverse path) | 19% ±19 | 64.2 ±20.5 | 8% | 186 ±39 | 0.0 ±0.0 | 74 ±16 |
+| CT flood (Glossy-style) | 42% ±21 | 71.1 ±17.0 | 12% | 1009 ±120 | 0.0 ±0.0 | 404 ±48 |
+| CT flood, pipelined (3 slots) | 34% ±23 | 63.2 ±14.1 | 12% | 975 ±95 | 0.0 ±0.0 | 390 ±38 |
+| route + host pacing | 22% ±22 | 51.3 ±16.7 | 16% | 172 ±38 | 0.0 ±0.0 | 69 ±15 |
+
+## suburb40k: 1 load of a 40 KB page
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| today's Gorb (flood, node.py fixes) | 95% ±22 | 337.4 ±110.6 | 0% | 584 ±264 | 0.0 ±0.0 | 233 ±106 |
+| Gorb v0.1 flood (before fixes) | 90% ±30 | 430.1 ±65.3 | 0% | 1310 ±223 | 0.0 ±0.0 | 524 ±89 |
+| RSSI timer (Meshtastic-like) | 95% ±22 | 308.7 ±97.1 | 0% | 501 ±215 | 0.0 ±0.0 | 200 ±86 |
+| gradient (ETX, closest first) | 100% ±0 | 227.5 ±60.7 | 0% | 228 ±112 | 0.0 ±0.0 | 91 ±45 |
+| route (unicast reverse path) | 95% ±22 | 209.0 ±102.7 | 5% | 211 ±153 | 0.0 ±0.0 | 84 ±61 |
+| CT flood (Glossy-style) | 100% ±0 | 147.4 ±7.5 | 0% | 2011 ±32 | 0.0 ±0.0 | 804 ±13 |
+| CT flood, pipelined (3 slots) | 100% ±0 | 145.4 ±19.9 | 0% | 1956 ±93 | 0.0 ±0.0 | 782 ±37 |
+| route + host pacing | 100% ±0 | 211.2 ±111.9 | 5% | 246 ±170 | 0.0 ±0.0 | 99 ±68 |
+
+# Idea 2: how sensitive concurrent-transmission flooding is to timing
+
+20 random seeds per row; mean ± standard deviation across seeds.
+Load time = median over the loads that finished (failures excluded); 'within 60 s' = share of all loads finished within 60 s.
+
+## suburb1: 1 load of a 6 KB page
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| CT, 30 us jitter | 100% ±0 | 22.0 ±2.3 | 100% | 303 ±3 | 0.0 ±0.0 | 121 ±1 |
+| CT, 150 us jitter | 100% ±0 | 24.7 ±7.8 | 100% | 301 ±7 | 0.0 ±0.0 | 120 ±3 |
+| CT, 1 ms jitter (> 1 symbol) | 55% ±50 | 59.6 ±16.1 | 30% | 288 ±127 | 0.0 ±0.0 | 115 ±51 |
+| CT, 30 us, 30% beating loss | 100% ±0 | 28.7 ±6.3 | 100% | 292 ±14 | 0.0 ±0.0 | 117 ±6 |
+| CT, tolerance 0.25 symbol | 95% ±22 | 22.5 ±3.7 | 95% | 303 ±7 | 0.0 ±0.0 | 121 ±3 |
+
+# Ideas 7/8: repairing lost chunks (combining, coding, local repair, fast NACK)
+
+20 random seeds per row; mean ± standard deviation across seeds.
+Load time = median over the loads that finished (failures excluded); 'within 60 s' = share of all loads finished within 60 s.
+
+## suburb1: 1 load of a 6 KB page
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| today's Gorb (flood) | 95% ±22 | 64.2 ±19.5 | 30% | 94 ±47 | 0.0 ±0.0 | 38 ±19 |
+| + packet combining | 100% ±0 | 63.6 ±16.4 | 30% | 85 ±35 | 0.0 ±0.0 | 34 ±14 |
+| + fountain coding 10% | 100% ±0 | 57.2 ±18.2 | 45% | 83 ±39 | 0.0 ±0.0 | 33 ±15 |
+| + local repair | 90% ±30 | 59.8 ±12.5 | 35% | 107 ±40 | 0.0 ±0.0 | 43 ±16 |
+| + fast repair | 100% ±0 | 135.5 ±60.7 | 10% | 358 ±178 | 0.0 ±0.0 | 143 ±71 |
+| gradient + fast repair | 100% ±0 | 73.4 ±39.2 | 45% | 130 ±91 | 0.0 ±0.0 | 52 ±36 |
+| gradient + fast + coding | 100% ±0 | 44.8 ±23.8 | 80% | 61 ±40 | 0.0 ±0.0 | 24 ±16 |
+| gradient + fast + combining | 100% ±0 | 74.8 ±40.4 | 40% | 136 ±97 | 0.0 ±0.0 | 54 ±39 |
+| route + coding | 100% ±0 | 40.9 ±21.7 | 75% | 34 ±26 | 0.0 ±0.0 | 14 ±10 |
+| route + coding + pacing | 100% ±0 | 40.0 ±22.3 | 75% | 38 ±31 | 0.0 ±0.0 | 15 ±12 |
+
+## suburb4: 4 loads of 6 KB pages within 20 s
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| today's Gorb (flood) | 9% ±14 | 75.4 ±13.5 | 1% | 267 ±59 | 0.0 ±0.0 | 107 ±23 |
+| + packet combining | 5% ±17 | 68.6 ±6.1 | 1% | 255 ±42 | 0.0 ±0.0 | 102 ±17 |
+| + fountain coding 10% | 11% ±17 | 70.1 ±16.1 | 4% | 259 ±54 | 0.0 ±0.0 | 103 ±22 |
+| + local repair | 4% ±12 | 75.2 ±4.8 | 0% | 298 ±56 | 0.0 ±0.0 | 119 ±23 |
+| + fast repair | 48% ±41 | 499.9 ±158.8 | 1% | 3123 ±664 | 0.0 ±0.0 | 1249 ±266 |
+| gradient + fast repair | 40% ±33 | 384.3 ±171.2 | 0% | 2803 ±682 | 0.0 ±0.0 | 1121 ±273 |
+| gradient + fast + coding | 48% ±35 | 292.5 ±169.2 | 5% | 2581 ±533 | 0.0 ±0.0 | 1032 ±213 |
+| gradient + fast + combining | 40% ±35 | 407.2 ±187.1 | 0% | 2863 ±654 | 0.0 ±0.0 | 1145 ±261 |
+| route + coding | 38% ±27 | 74.9 ±17.5 | 14% | 203 ±54 | 0.0 ±0.0 | 81 ±22 |
+| route + coding + pacing | 38% ±30 | 65.4 ±20.5 | 19% | 207 ±43 | 0.0 ±0.0 | 83 ±17 |
+
+# Idea 4: LoRa data rate (network-wide preset, and per-link adaptive)
+
+20 random seeds per row; mean ± standard deviation across seeds.
+Load time = median over the loads that finished (failures excluded); 'within 60 s' = share of all loads finished within 60 s.
+
+## suburb4: 4 loads of 6 KB pages within 20 s
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| flood, SF8/500k | 9% ±14 | 75.4 ±13.5 | 1% | 267 ±59 | 0.0 ±0.0 | 107 ±23 |
+| flood, SF6/500k | 36% ±30 | 54.4 ±10.9 | 22% | 171 ±29 | 0.0 ±0.0 | 68 ±12 |
+| flood, SF7/500k | 16% ±23 | 63.6 ±20.2 | 8% | 208 ±45 | 0.0 ±0.0 | 83 ±18 |
+| flood, SF9/500k | 6% ±13 | 116.1 ±31.5 | 0% | 363 ±103 | 0.0 ±0.0 | 145 ±41 |
+| gradient+fast, SF6/500k | 92% ±16 | 118.9 ±62.2 | 28% | 488 ±475 | 0.0 ±0.0 | 195 ±190 |
+| gradient+fast, SF7/500k | 76% ±31 | 260.8 ±157.2 | 8% | 1435 ±924 | 0.0 ±0.0 | 574 ±370 |
+| gradient+fast, SF8/500k | 40% ±33 | 384.3 ±171.2 | 0% | 2803 ±682 | 0.0 ±0.0 | 1121 ±273 |
+| gradient+fast, SF9/500k | 16% ±18 | 367.5 ±193.9 | 0% | 3371 ±203 | 0.0 ±0.0 | 1348 ±81 |
+| route+fast, SF8 fixed | 45% ±36 | 415.7 ±214.1 | 1% | 2744 ±501 | 0.0 ±0.0 | 1098 ±201 |
+| route+fast, per-hop SF5-8 (multi-SF rx, upper bound) | 56% ±39 | 293.0 ±248.5 | 15% | 2300 ±1001 | 0.0 ±0.0 | 920 ±400 |
+
+# Idea 3: LoRa + Wi-Fi together (mixed town, 30% LoRa boards)
+
+20 random seeds per row; mean ± standard deviation across seeds.
+Load time = median over the loads that finished (failures excluded); 'within 60 s' = share of all loads finished within 60 s.
+
+## mixed: mixed town, 3 loads
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| baseline: flood on every radio (firmware) | 28% ±30 | 37.1 ±25.9 | 22% | 126 ±44 | 3.6 ±1.4 | 53 ±18 |
+| LoRa only (Wi-Fi off) | 27% ±23 | 45.1 ±22.5 | 17% | 56 ±56 | 0.0 ±0.0 | 22 ±23 |
+| ESP-NOW only (LoRa off) | 10% ±19 | 14.2 ±12.7 | 10% | 0 ±0 | 0.3 ±0.3 | 0 ±0 |
+| flood, Wi-Fi in LR 250k | 37% ±31 | 38.5 ±20.6 | 25% | 138 ±48 | 21.0 ±8.3 | 72 ±25 |
+| route, best radio per hop | 72% ±34 | 167.1 ±132.8 | 25% | 916 ±694 | 30.5 ±24.3 | 391 ±296 |
+| route, best radio + Wi-Fi rate per hop | 75% ±28 | 237.0 ±172.6 | 23% | 998 ±648 | 32.0 ±21.8 | 425 ±276 |
+| gradient + fast repair (both radios) | 77% ±26 | 241.0 ±171.1 | 20% | 1040 ±628 | 34.4 ±21.6 | 444 ±268 |
+
+# Plain ESP32 only (no LoRa): ESP-NOW options
+
+20 random seeds per row; mean ± standard deviation across seeds.
+Load time = median over the loads that finished (failures excluded); 'within 60 s' = share of all loads finished within 60 s.
+
+## esp32: plain ESP32s, 3 loads
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| baseline: ESP-NOW 1M flood, 180 B chunks | 93% ±13 | 19.9 ±5.4 | 93% | 0 ±0 | 4.2 ±1.4 | 3 ±1 |
+| Wi-Fi LR 250k flood | 95% ±12 | 16.4 ±4.5 | 95% | 0 ±0 | 12.6 ±4.1 | 10 ±3 |
+| Wi-Fi LR 500k flood | 98% ±7 | 16.9 ±3.8 | 98% | 0 ±0 | 7.2 ±2.4 | 6 ±2 |
+| ESP-NOW v2 1400 B chunks, flood | 87% ±19 | 8.1 ±3.3 | 87% | 0 ±0 | 3.3 ±1.3 | 3 ±1 |
+| LR 250k + 1400 B chunks, flood | 87% ±22 | 16.5 ±4.4 | 87% | 0 ±0 | 15.3 ±4.6 | 12 ±4 |
+| gradient + fast repair | 100% ±0 | 15.3 ±3.2 | 98% | 0 ±0 | 1.8 ±1.0 | 1 ±1 |
+| route + per-hop rate + ACK | 100% ±0 | 15.2 ±4.1 | 100% | 0 ±0 | 2.1 ±0.9 | 2 ±1 |
+| route + per-hop rate + 1400 B | 100% ±0 | 5.2 ±4.0 | 100% | 0 ±0 | 3.3 ±1.8 | 3 ±1 |
+
+# Idea 5: several LoRa channels (8 hosts, 8 loads at once)
+
+20 random seeds per row; mean ± standard deviation across seeds.
+Load time = median over the loads that finished (failures excluded); 'within 60 s' = share of all loads finished within 60 s.
+
+## busy8: 8 hosts, 8 loads within 10 s
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| flood, 1 channel | 2% ±4 | 41.8 ±6.8 | 2% | 278 ±71 | 0.0 ±0.0 | 111 ±28 |
+| flood, 4 channels (host cells) | 56% ±15 | 46.0 ±15.6 | 34% | 344 ±80 | 0.0 ±0.0 | 138 ±32 |
+| flood, 8 channels (host cells) | 59% ±17 | 35.7 ±14.4 | 49% | 205 ±44 | 0.0 ±0.0 | 82 ±18 |
+| gradient+fast, 1 channel | 11% ±13 | 356.6 ±239.1 | 2% | 4251 ±238 | 0.0 ±0.0 | 1700 ±95 |
+| gradient+fast, 4 channels | 90% ±6 | 74.9 ±37.6 | 40% | 626 ±337 | 0.0 ±0.0 | 250 ±135 |
+
+# Idea 6: a popular page (20 loads of one page in 5 minutes)
+
+20 random seeds per row; mean ± standard deviation across seeds.
+Load time = median over the loads that finished (failures excluded); 'within 60 s' = share of all loads finished within 60 s.
+
+## popular: 20 loads of one page over 5 min
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| today's Gorb: pull + Echo | 3% ±4 | 6.4 ±7.9 | 3% | 776 ±153 | 0.0 ±0.0 | 311 ±61 |
+| pull, no Echo | 1% ±2 | 12.5 ±5.4 | 1% | 706 ±87 | 0.0 ±0.0 | 282 ±35 |
+| page-addressed + coalescing | 86% ±10 | 20.7 ±22.8 | 64% | 773 ±189 | 0.0 ±0.0 | 309 ±76 |
+| page-addressed + coding | 98% ±4 | 0.0 ±0.0 | 91% | 464 ±205 | 0.0 ±0.0 | 186 ±82 |
+| push carousel every 60 s | 91% ±16 | 9.8 ±16.2 | 74% | 645 ±124 | 0.0 ±0.0 | 258 ±50 |
+| page-addressed + coding + route | 91% ±9 | 0.0 ±0.0 | 89% | 237 ±80 | 0.0 ±0.0 | 95 ±32 |
+
+# Best combination vs. today's Gorb
+
+20 random seeds per row; mean ± standard deviation across seeds.
+Load time = median over the loads that finished (failures excluded); 'within 60 s' = share of all loads finished within 60 s.
+
+## suburb1: 1 load of a 6 KB page
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| today's Gorb | 95% ±22 | 64.2 ±19.5 | 30% | 94 ±47 | 0.0 ±0.0 | 38 ±19 |
+| Smart stack: route + coding + pacing | 100% ±0 | 40.0 ±22.3 | 75% | 38 ±31 | 0.0 ±0.0 | 15 ±12 |
+
+## suburb4: 4 loads of 6 KB pages within 20 s
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| today's Gorb | 9% ±14 | 75.4 ±13.5 | 1% | 267 ±59 | 0.0 ±0.0 | 107 ±23 |
+| Smart stack: route + coding + pacing | 38% ±30 | 65.4 ±20.5 | 19% | 207 ±43 | 0.0 ±0.0 | 83 ±17 |
+| Smart stack + page-addressed | 8% ±18 | 29.4 ±7.8 | 8% | 97 ±19 | 0.0 ±0.0 | 39 ±7 |
+| Smart stack + 4 LoRa channels | 79% ±23 | 21.1 ±9.7 | 74% | 69 ±32 | 0.0 ±0.0 | 27 ±13 |
+| Smart stack + SF6 | 75% ±25 | 31.5 ±7.5 | 75% | 70 ±22 | 0.0 ±0.0 | 28 ±9 |
+
+## suburb40k: 1 load of a 40 KB page
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| today's Gorb | 95% ±22 | 337.4 ±110.6 | 0% | 584 ±264 | 0.0 ±0.0 | 233 ±106 |
+| Smart stack: route + coding + pacing | 100% ±0 | 193.1 ±113.2 | 15% | 280 ±230 | 0.0 ±0.0 | 112 ±92 |
+
+## mixed: mixed town, 3 loads
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| today's Gorb | 28% ±30 | 37.1 ±25.9 | 22% | 126 ±44 | 3.6 ±1.4 | 53 ±18 |
+| Smart stack: route + coding + pacing | 63% ±30 | 33.5 ±20.6 | 53% | 64 ±39 | 1.3 ±0.9 | 26 ±16 |
+
+## popular: 20 loads of one page over 5 min
+
+| variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
+|---|---|---|---|---|---|---|
+| today's Gorb | 3% ±4 | 6.4 ±7.9 | 3% | 776 ±153 | 0.0 ±0.0 | 311 ±61 |
+| Smart stack: route + coding + pacing | 65% ±27 | 0.3 ±1.3 | 63% | 683 ±246 | 0.0 ±0.0 | 273 ±98 |
+| Smart stack + page-addressed | 91% ±9 | 0.4 ±1.7 | 89% | 259 ±87 | 0.0 ±0.0 | 103 ±35 |
+| Smart stack + SF6 | 95% ±8 | 0.0 ±0.0 | 95% | 123 ±46 | 0.0 ±0.0 | 49 ±19 |
+
+
+all done in 518 s; results in /home/user/Gorb/lab/radio/sim/results

@@ -28,6 +28,7 @@ from . import phy
 from .engine import Iface
 
 GET, DATA, RESEND = 2, 3, 4
+CANCEL_ROUND = 250  # gorb/node.py: RESEND round meaning "stop, I have it"
 
 
 @dataclass
@@ -39,7 +40,12 @@ class Cfg:
     chunk: int = 180
     header: int = 35
     retries: int = 6
-    timeout: float = 120.0  # gorb/node.py fetch() default
+    timeout: float = 900.0  # gorb/node.py fetch() default (was 120 s before the lab fixes)
+    # today's Gorb (gorb/node.py after the first lab round): replies get TTL =
+    # the request's hop count (+1 on retries), hosts never queue a chunk twice,
+    # pace replies that went through a relay, and a requester that completes
+    # the page from an overheard Echo copy sends "stop" (empty RESEND)
+    v2: bool = True
     lora_mode: object = phy.US915
     wifi_mode: object = phy.ESPNOW
     duty: float = 0.5  # rules.MAX_TX_DUTY (US); EU868 0.1
@@ -190,6 +196,8 @@ class Node:
         self.link = {}  # (nbr, band) -> last rssi
         self.corrupt = {}
         self.page_heard = {}
+        self.unsent = {}  # (requester, msg) -> chunks queued but not yet sent
+        self.cancelled = set()
         self.stats = {"relayed": 0, "served": 0, "echo_served": 0}
 
     # ------------------------------------------------------------ helpers
@@ -415,7 +423,7 @@ class Node:
         self.sim.after(self.cfg.ct_spacing * self.ct_slot(p.size), self.ct_stream, pkts, i + 1)
 
     # ---- unicast along the path (route idea), choosing radio + rate per hop
-    def route_send(self, pkt, nxt, prio=0):
+    def route_send(self, pkt, nxt, prio=0, drop=None):
         cfg = self.cfg
         best = None
         for band, ifc in self.ifaces.items():
@@ -439,10 +447,10 @@ class Node:
                 if best is None or cost < best[0]:
                     best = (cost, ifc, m)
         if best is None:
-            return self.emit(pkt, prio)  # no idea how to reach it: broadcast
+            return self.emit(pkt, prio, drop)  # no idea how to reach it: broadcast
         _, ifc, m = best
         dst = nxt if m.kind == "wifi" else None
-        ifc.send(pkt, prio, mode=m, dst=dst)
+        ifc.send(pkt, prio, mode=m, dst=dst, drop=drop)
 
     # ---------------------------------------------------------------- Echo
     def echo_listen(self, pkt):
@@ -464,6 +472,15 @@ class Node:
         if self.complete(s, pkt.total):
             self.echo_pages[pkt.page] = self.sim.now
             self.over.pop(key, None)
+            if self.cfg.v2 and not self.cfg.page_addr:
+                # a fetch of ours for the same page completes from this copy
+                for f in [f for k, f in self.fetch.items() if not isinstance(k, tuple)
+                          and f.page == pkt.page and not f.done]:
+                    f.echo = True
+                    self.finish(f, True)
+                    c = Pkt(RESEND, self.sid, f.host, f.msg, ttl=self.cfg.ttl, rnd=CANCEL_ROUND,
+                            size=self.cfg.header, page=f.page, need=[], chan=f.chan)
+                    self.originate(c)
 
     def complete(self, s, total):
         if not self.cfg.coding:
@@ -502,6 +519,8 @@ class Node:
         size = self.net.pages[req.page][1]
         out = []
         ttl = max(cfg.ttl, req.hops + 1)
+        if cfg.v2 and cfg.relay in ("flood", "rssi"):
+            ttl = req.hops + (1 if rnd > 0 else 0)
         h = self.d_req.get(req.msg, req.hops + 1)
         for s in seqs:
             nbytes = cfg.chunk if (cfg.coding or s < total - 1) else size - cfg.chunk * (total - 1)
@@ -516,6 +535,8 @@ class Node:
             if cfg.pace:
                 hops = min(max(req.hops, 0), 2)  # relays the GET went through
                 out[-1].gap = cfg.pace * cfg.lora_mode.airtime(out[-1].size) * hops
+            elif cfg.v2 and req.hops > 0 and cfg.relay != "ct":  # node.py: max(0.3 s, 2 x airtime) after each chunk
+                out[-1].gap = max(0.3, 2 * self.air(out[-1].size))
         return out
 
     def start_send(self, req, src_id, seqs=None):
@@ -535,6 +556,17 @@ class Node:
         if cfg.page_addr:
             self.page_round = getattr(self, "page_round", 0) + 1
             rnd = self.page_round
+        rk = (req.src, req.msg)
+        drop = None
+        if cfg.v2 and not cfg.page_addr and cfg.relay != "ct":
+            if rk in self.cancelled:
+                return
+            unsent = self.unsent.setdefault(rk, set())
+            seqs = [s for s in seqs if s not in unsent]  # don't queue what is still waiting
+            unsent.update(seqs)
+
+            def drop(rk=rk):
+                return rk in self.cancelled
         pk = self.data_pkts(req, src_id, seqs, rnd, total)
         if cfg.page_addr:
             est = sum(self.air(p.size) for p in pk) * (1.2 if cfg.relay != "ct" else cfg.ct_spacing)
@@ -543,12 +575,20 @@ class Node:
             return self.ct_stream(pk)
         for p in pk:
             self.remember(p.key)
+            d = None
+            if drop is not None:
+                def d(p=p, rk=rk):
+                    self.unsent.get(rk, set()).discard(p.seq)  # it is going out now
+                    return rk in self.cancelled
             if cfg.relay == "route" and p.nh >= 0:
-                self.route_send(p, p.nh, prio=p.total)
+                self.route_send(p, p.nh, prio=p.total, drop=d)
             else:
-                self.emit(p, p.total)
+                self.emit(p, p.total, d)
 
     def resend(self, pkt):
+        if pkt.rnd == CANCEL_ROUND:  # "I have it now, stop"
+            self.cancelled.add((pkt.src, pkt.msg))
+            return
         key = ("p", pkt.page) if self.cfg.page_addr else (pkt.src, pkt.msg)
         st = self.responses.get(key)
         if pkt.page not in self.sites and st is None:

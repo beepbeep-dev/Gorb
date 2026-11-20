@@ -140,10 +140,12 @@ def experiments():
         "variants": [],
     }
     for scn in ("suburb1", "suburb4", "suburb40k"):
-        to = 900.0 if scn == "suburb40k" else 120.0
+        to = 900.0
         L = dict(LORA_ONLY, retries=20) if scn == "suburb40k" else LORA_ONLY
         E["relay"]["variants"] += [
-            V("baseline flood", scn, dict(L, timeout=to)),
+            V("today's Gorb (flood, node.py fixes)", scn, dict(L, timeout=to)),
+            V("Gorb v0.1 flood (before fixes)", scn, dict(L, timeout=120.0 if scn != "suburb40k" else to,
+                                                          v2=False)),
             V("RSSI timer (Meshtastic-like)", scn, dict(L, relay="rssi", suppress=1, timeout=to)),
             V("gradient (ETX, closest first)", scn, dict(L, relay="gradient", timeout=to)),
             V("route (unicast reverse path)", scn, dict(L, relay="route", timeout=to)),
@@ -168,7 +170,7 @@ def experiments():
     }
     for scn in ("suburb1", "suburb4"):
         E["repair"]["variants"] += [
-            V("baseline flood", scn, dict(L)),
+            V("today's Gorb (flood)", scn, dict(L)),
             V("+ packet combining", scn, dict(L, combining=True)),
             V("+ fountain coding 10%", scn, dict(L, coding=True, redundancy=0.1)),
             V("+ local repair", scn, dict(L, local_repair=True)),
@@ -186,17 +188,17 @@ def experiments():
         "title": "Idea 4: LoRa data rate (network-wide preset, and per-link adaptive)",
         "variants": [],
     }
-    for sf in (6, 7, 8, 9):
+    for sf in (8, 6, 7, 9):
         m = phy.lora(sf, 500)
         E["sf"]["variants"].append(V(f"flood, SF{sf}/500k", "suburb4", dict(L, lora_mode=m)))
-    for sf in (6, 7, 8, 9):
+    for sf in (8, 6, 7, 9):
         m = phy.lora(sf, 500)
-        E["sf"]["variants"].append(V(f"gradient+fast, SF{sf}/500k", "suburb4",
-                                     dict(L, lora_mode=m, relay="gradient", fast_repair=True)))
+        E["sf"]["variants"].append(V(f"gradient, SF{sf}/500k", "suburb4",
+                                     dict(L, lora_mode=m, relay="gradient")))
     E["sf"]["variants"] += [
-        V("route+fast, SF8 fixed", "suburb4", dict(L, relay="route", fast_repair=True)),
-        V("route+fast, per-hop SF5-8 (multi-SF rx, upper bound)", "suburb4",
-          dict(L, relay="route", fast_repair=True, adapt=True, lora_rates=(5, 6, 7)),
+        V("route, SF8 fixed", "suburb4", dict(L, relay="route")),
+        V("route, per-hop SF5-8 (multi-SF rx, upper bound)", "suburb4",
+          dict(L, relay="route", adapt=True, lora_rates=(5, 6, 7)),
           {"multi_sf_rx": True}),
     ]
     E["multiradio"] = {
@@ -206,11 +208,11 @@ def experiments():
             V("LoRa only (Wi-Fi off)", "mixed", dict(use_wifi=False)),
             V("ESP-NOW only (LoRa off)", "mixed", dict(use_lora=False)),
             V("flood, Wi-Fi in LR 250k", "mixed", dict(wifi_mode=phy.WIFI_LR250)),
-            V("route, best radio per hop", "mixed", dict(relay="route", fast_repair=True)),
+            V("route, best radio per hop", "mixed", dict(relay="route")),
             V("route, best radio + Wi-Fi rate per hop", "mixed",
-              dict(relay="route", fast_repair=True, adapt=True,
+              dict(relay="route", adapt=True,
                    wifi_rates=("b1", "b2", "b5.5", "b11", "g6", "g12", "g24", "g54"))),
-            V("gradient + fast repair (both radios)", "mixed", dict(relay="gradient", fast_repair=True)),
+            V("gradient (both radios)", "mixed", dict(relay="gradient")),
         ],
     }
     big = dict(chunk=1400)
@@ -223,12 +225,12 @@ def experiments():
             V("ESP-NOW v2 1400 B chunks, flood", "esp32", dict(use_lora=False, **big)),
             V("LR 250k + 1400 B chunks, flood", "esp32",
               dict(use_lora=False, wifi_mode=phy.WIFI_LR250, **big)),
-            V("gradient + fast repair", "esp32", dict(use_lora=False, relay="gradient", fast_repair=True)),
+            V("gradient", "esp32", dict(use_lora=False, relay="gradient")),
             V("route + per-hop rate + ACK", "esp32",
-              dict(use_lora=False, relay="route", fast_repair=True, adapt=True,
+              dict(use_lora=False, relay="route", adapt=True,
                    wifi_rates=("lr250", "lr500", "b1", "b2", "b5.5", "b11", "g6", "g12", "g24", "g54"))),
             V("route + per-hop rate + 1400 B", "esp32",
-              dict(use_lora=False, relay="route", fast_repair=True, adapt=True,
+              dict(use_lora=False, relay="route", adapt=True,
                    wifi_rates=("lr250", "lr500", "b1", "b2", "b5.5", "b11", "g6", "g12", "g24", "g54"),
                    **big)),
         ],
@@ -239,21 +241,21 @@ def experiments():
             V("flood, 1 channel", "busy8", dict(L)),
             V("flood, 4 channels (host cells)", "busy8", dict(L, lora_channels=4)),
             V("flood, 8 channels (host cells)", "busy8", dict(L, lora_channels=8)),
-            V("gradient+fast, 1 channel", "busy8", dict(L, relay="gradient", fast_repair=True)),
-            V("gradient+fast, 4 channels", "busy8", dict(L, relay="gradient", fast_repair=True,
+            V("gradient, 1 channel", "busy8", dict(L, relay="gradient")),
+            V("gradient, 4 channels", "busy8", dict(L, relay="gradient",
                                                         lora_channels=4)),
         ],
     }
     E["popular"] = {
         "title": "Idea 6: a popular page (20 loads of one page in 5 minutes)",
         "variants": [
+            V("today's Gorb: pull + Echo", "popular", dict(L)),
             V("pull, no Echo", "popular", dict(L, echo=False)),
-            V("baseline: pull + Echo", "popular", dict(L)),
             V("page-addressed + coalescing", "popular", dict(L, page_addr=True)),
             V("page-addressed + coding", "popular", dict(L, page_addr=True, coding=True, redundancy=0.1)),
             V("push carousel every 60 s", "popular", dict(L, page_addr=True), carousel=60.0),
-            V("page-addr + gradient + fast", "popular",
-              dict(L, page_addr=True, relay="gradient", fast_repair=True)),
+            V("page-addressed + coding + route", "popular",
+              dict(L, page_addr=True, coding=True, redundancy=0.1, relay="route")),
         ],
     }
     E["stack"] = {
@@ -262,7 +264,7 @@ def experiments():
     }
     best = dict(relay="route", coding=True, redundancy=0.1, pace=1.0)
     for scn in ("suburb1", "suburb4", "suburb40k", "mixed", "popular"):
-        to = 900.0 if scn == "suburb40k" else 120.0
+        to = 900.0
         base = dict(LORA_ONLY) if scn != "mixed" else {}
         if scn == "suburb40k":
             base["retries"] = 20

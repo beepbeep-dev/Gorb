@@ -193,8 +193,17 @@ def tables_and_charts(E, out, seeds, log):
             f.write("\n".join(lines))
         log("\n".join(lines))
         chart(name, E[name]["title"], rows)
-    with open(os.path.join(OUT, "results.json"), "w") as f:
-        json.dump(allres, f, default=float)
+    path = os.path.join(OUT, "results.json")
+    old = {}
+    if os.path.exists(path):  # keep experiments not rerun this time (--only)
+        try:
+            with open(path) as f:
+                old = json.load(f)
+        except ValueError:
+            old = {}
+    old.update(allres)
+    with open(path, "w") as f:
+        json.dump(old, f, default=float)
 
 
 def chart(name, title, rows):

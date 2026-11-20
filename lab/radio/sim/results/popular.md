@@ -7,9 +7,9 @@ Load time = median over the loads that finished (failures excluded); 'within 60 
 
 | variant | pages delivered | load time (s) | within 60 s | LoRa airtime (s) | Wi-Fi airtime (s) | radio energy (J) |
 |---|---|---|---|---|---|---|
-| pull, no Echo | 0% ±0 | - | 0% | 1046 ±70 | 0.0 ±0.0 | 418 ±28 |
-| baseline: pull + Echo | 1% ±2 | 0.0 ±0.0 | 1% | 1074 ±97 | 0.0 ±0.0 | 430 ±39 |
-| page-addressed + coalescing | 72% ±15 | 19.5 ±18.5 | 55% | 933 ±155 | 0.0 ±0.0 | 373 ±62 |
-| page-addressed + coding | 95% ±5 | 1.1 ±4.1 | 85% | 611 ±186 | 0.0 ±0.0 | 244 ±74 |
-| push carousel every 60 s | 77% ±12 | 9.5 ±15.6 | 63% | 960 ±148 | 0.0 ±0.0 | 384 ±59 |
-| page-addr + gradient + fast | 36% ±33 | 12.1 ±30.9 | 33% | 1284 ±384 | 0.0 ±0.0 | 514 ±154 |
+| today's Gorb: pull + Echo | 3% ±4 | 6.4 ±7.9 | 3% | 776 ±153 | 0.0 ±0.0 | 311 ±61 |
+| pull, no Echo | 1% ±2 | 12.5 ±5.4 | 1% | 706 ±87 | 0.0 ±0.0 | 282 ±35 |
+| page-addressed + coalescing | 86% ±10 | 20.7 ±22.8 | 64% | 773 ±189 | 0.0 ±0.0 | 309 ±76 |
+| page-addressed + coding | 98% ±4 | 0.0 ±0.0 | 91% | 464 ±205 | 0.0 ±0.0 | 186 ±82 |
+| push carousel every 60 s | 91% ±16 | 9.8 ±16.2 | 74% | 645 ±124 | 0.0 ±0.0 | 258 ±50 |
+| page-addressed + coding + route | 91% ±9 | 0.0 ±0.0 | 89% | 237 ±80 | 0.0 ±0.0 | 95 ±32 |
