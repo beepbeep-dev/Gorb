@@ -310,8 +310,7 @@ def charts(r1, r2, r3):
     ax.set_xticks(ks, [str(k) for k in ks])
     ax.set_xlabel("source chunks K (180 bytes each)")
     ax.set_ylabel("extra packets needed beyond K (%)")
-    ax.set_title("Decode overhead: RLNC needs ~K packets, LT needs 10-60% more", loc="left")
-    ax.legend(frameon=False, loc="upper right")
+    ax.set_title("Decode overhead: RLNC needs ~K packets, LT needs 20-55% more", loc="left")
     ax.set_xlim(8, 900)
     fig.tight_layout()
     fig.savefig(HERE / "1-codec-overhead.png", dpi=130)
@@ -321,7 +320,7 @@ def charts(r1, r2, r3):
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), sharey=False)
     for ax, pname in zip(axes, PAGES):
         for sch in ("arq", "arq_echo", "arq_fixed", "mc_list", "rlnc"):
-            xs, ys = [], []
+            xs, ys, bad = [], [], []
             for n in (1, 5, 20, 100):
                 key = f"N={n} loss=15% {pname}"
                 d = r2.get(key, {}).get(sch if n > 1 or sch in ("arq", "rlnc") else None)
@@ -330,7 +329,11 @@ def charts(r1, r2, r3):
                 if d:
                     xs.append(n)
                     ys.append(d["air"] / 60)
-            ax.plot(xs, ys, marker="o", markersize=7, color=COLORS[sch], label=LABELS[sch])
+                    bad.append(d["delivered"] < 0.9)
+            ax.plot(xs, ys, color=COLORS[sch], label=LABELS[sch])
+            for x, y, b in zip(xs, ys, bad):  # hollow marker = under 90% got the page
+                ax.plot([x], [y], marker="o", markersize=8, color=COLORS[sch],
+                        markerfacecolor="#fcfcfb" if b else COLORS[sch], markeredgewidth=2)
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_xticks([1, 5, 20, 100], ["1", "5", "20", "100"])
@@ -338,7 +341,9 @@ def charts(r1, r2, r3):
         ax.set_ylabel("channel time used (minutes)")
         ax.set_title(f"{pname} page, 15% loss, US915", loc="left")
     axes[0].legend(frameon=False, fontsize=8, loc="upper left")
-    fig.tight_layout()
+    fig.text(0.01, 0.01, "Hollow marker: fewer than 90% of listeners got the page "
+             "(channel time then counts until they gave up).", fontsize=8, color="#52514e")
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
     fig.savefig(HERE / "2-airtime-vs-listeners.png", dpi=130)
     plt.close(fig)
 
@@ -357,26 +362,37 @@ def charts(r1, r2, r3):
         ax.set_xlabel("seconds until the listener has the page (log)")
         ax.set_ylabel("share of the 20 listeners")
         ax.set_title(f"20 listeners, {pname}, 15% loss", loc="left")
+        g = r2[key]["arq"]["delivered"], r2[key]["arq_echo"]["delivered"]
+        ax.text(6, 0.5, f"Gorb today: {100 * g[0]:.0f}% got it\n(+Echo: {100 * g[1]:.0f}%)",
+                fontsize=8, color="#52514e")
     axes[0].legend(frameon=False, fontsize=8, loc="upper left")
     fig.tight_layout()
     fig.savefig(HERE / "3-time-to-page.png", dpi=130)
     plt.close(fig)
 
     # 4. scenarios bar chart (airtime, 40 KB)
-    scen = ["N=20 loss=15% 40 KB", "hetero N=20 40 KB", "bursty N=20 40 KB", "relay N=20 40 KB"]
-    names = ["same 15% loss", "near 3% / far 30%", "bursty (avg 15%)", "behind 1 relay"]
-    schs = ["arq_echo", "arq_fixed", "mc_list", "rlnc"]
-    fig, ax = plt.subplots(figsize=(9, 4))
-    w = 0.2
+    scen = ["N=20 loss=15% 40 KB", "hetero N=20 40 KB", "bursty N=20 40 KB",
+            "relay N=20 paced 40 KB"]
+    names = ["same 15% loss", "near 3% / far 30%", "bursty (avg 15%)", "behind 1 relay\n(host paced)"]
+    schs = ["arq_fixed", "mc_list", "rlnc"]
+    fig, ax = plt.subplots(figsize=(9, 4.2))
+    w = 0.26
     for i, sch in enumerate(schs):
         ys = [r2[s][sch]["air"] / 60 for s in scen]
-        ax.bar(np.arange(len(scen)) + (i - 1.5) * w, ys, w * 0.92, color=COLORS[sch],
-               label=LABELS[sch])
+        xs = np.arange(len(scen)) + (i - 1) * w
+        ax.bar(xs, ys, w * 0.92, color=COLORS[sch], label=LABELS[sch])
+        for x, y, s in zip(xs, ys, scen):
+            ax.text(x, y * 1.08, f"{100 * r2[s][sch]['delivered']:.0f}%", ha="center",
+                    fontsize=7, color="#52514e")
+    ax.text(0.99, 0.97, "label above bar = share of listeners that got the page\n"
+            "(Gorb today: 0% in all four cases)", transform=ax.transAxes, ha="right", va="top",
+            fontsize=8, color="#52514e")
     ax.set_xticks(range(len(scen)), names)
     ax.set_yscale("log")
     ax.set_ylabel("channel time used (minutes, log)")
     ax.set_title("20 listeners want a 40 KB page at once (US915)", loc="left")
-    ax.legend(frameon=False, fontsize=8)
+    ax.legend(frameon=False, fontsize=8, loc="upper left")
+    ax.set_ylim(0.3, 300)
     fig.tight_layout()
     fig.savefig(HERE / "4-scenarios.png", dpi=130)
     plt.close(fig)

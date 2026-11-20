@@ -561,7 +561,9 @@ static void hostRequest(const gorb::Packet &pk) {
     statServed++;
   }
   job->round = pk.round;
-  job->ttl = std::max<uint8_t>(3, pk.hops + 1);
+  // Reply as far as the request travelled (+1 hop on retries, in case the
+  // link only works one way): a direct request needs no relaying.
+  job->ttl = pk.hops + (pk.round > 0 ? 1 : 0);
   job->lastUsed = millis();
   job->todo.clear();
   if (pk.type == gorb::GET) {

@@ -236,15 +236,16 @@ class MFSK4:
         def llrs(first_sym, nsym):
             idx = start + (first_sym + np.arange(nsym) + 1) * sps - 1
             # timing tracking: best offset per 64-symbol block, line fit (handles clock offset)
+            # follow the drift block by block (each search is centred on the previous block)
             Emax = E.max(0)
-            offs = np.arange(-12, 13)
             nb = max(1, nsym // 64)
             blk = np.array_split(np.arange(nsym), nb)
-            best, wts, centers = [], [], []
+            best, centers, prev = [], [], 0
             for b in blk:
+                offs = np.arange(prev - 8, prev + 9)
                 sc = np.array([Emax[np.clip(idx[b] + d, 0, len(Emax) - 1)].sum() for d in offs])
-                best.append(offs[np.argmax(sc)])
-                wts.append(1.0)
+                prev = int(offs[np.argmax(sc)])
+                best.append(prev)
                 centers.append(b.mean())
             if nb >= 3:
                 c = np.polyfit(centers, best, 1)
@@ -410,8 +411,11 @@ def summarize(data, out_path):
                     best[s] = max(best[s], r["goodput"])
             lines.append("| " + " | ".join(row) + " |")
         af = {s: get("afsk", chan, s)["goodput"] for s in snrs}
+        fb = {s: max(best[s], *(get(k, chan, s)["goodput"] for k in ("4fsk-1/2", "4fsk-3/4"))) for s in snrs}
         lines.append("| **Modem 2 adaptive (best OFDM mode)** | | " + " | ".join(
             f"**{best[s]:.0f}** ({best[s] / af[s]:.1f}x)" if af[s] > 0 else f"**{best[s]:.0f}** (AFSK: 0)" for s in snrs) + " |")
+        lines.append("| adaptive incl. 4FSK fallback | | " + " | ".join(
+            f"{fb[s]:.0f} ({fb[s] / af[s]:.1f}x)" if af[s] > 0 else f"{fb[s]:.0f} (AFSK: 0)" for s in snrs) + " |")
     # derived: what if several frames share one key-up (leader sent once), or a shorter leader
     lines.append("\n### Derived from the measured FER on the FM path: leader overhead\n")
     lines.append("goodput = (1-FER) x 1760 bits / airtime, with airtime recomputed analytically. FER is the measured value.\n")

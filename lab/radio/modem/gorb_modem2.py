@@ -49,9 +49,9 @@ DATA_IDX = np.setdiff1d(np.arange(N_ACT), PILOT_IDX)  # 48 data carriers
 N_DATA = len(DATA_IDX)
 PILOT_SPACING = 13
 EARLY = 24  # receiver starts each FFT window this many samples into the CP
-# TX clips the OFDM waveform at this many x RMS. Clipping adds a little in-band noise but makes
-# the signal louder for the same peak level, which matters on an FM radio's deviation limiter.
-TX_CREST = {1: 3.0, 2: 3.0, 3: 3.0, 4: 3.0, 5: 3.0, 6: 3.0}
+# TX clips the OFDM waveform at 3x RMS (9.5 dB crest factor). Clipping harder (2x, 1.6x) was
+# tried and did not help on the FM path: the radio's pre-emphasis regrows the peaks.
+TX_CREST = 3.0
 TX_PEAK = 0.9
 N_EST = 5  # leader copies averaged for the channel estimate (5 x 21 ms)
 SG_WIN, SG_ORDER = 7, 2  # channel estimate smoothing across carriers (local quadratic fit)
@@ -292,7 +292,7 @@ def bitrate(mode) -> float:
 def modulate(payload: bytes, mode="16qam-3/4", leader_ms: float = 250.0, crest: float | None = None) -> np.ndarray:
     """Return float32 audio at 48 kHz (peak <= 0.9) for one frame.
 
-    `crest` is the TX clipping level in multiples of RMS (default: per mode, see TX_CREST).
+    `crest` is the TX clipping level in multiples of RMS (default TX_CREST).
     """
     mode = MODE_BY_NAME[mode] if isinstance(mode, str) else mode
     if len(payload) > MAX_PAYLOAD:
@@ -310,7 +310,7 @@ def modulate(payload: bytes, mode="16qam-3/4", leader_ms: float = 250.0, crest: 
     t = np.hstack([t[:, -CP:], t]).reshape(-1)  # cyclic prefix
     n_leader = max(3, int(round(leader_ms / 1000 * FS / NFFT)))
     audio = np.concatenate([np.tile(SYNC_TIME, n_leader), -SYNC_TIME, t, np.zeros(FS // 100)])
-    crest = TX_CREST.get(mode, 3.0) if crest is None else crest
+    crest = TX_CREST if crest is None else crest
     audio = np.clip(audio, -crest, crest) * (TX_PEAK / crest)
     ramp = FS // 200
     audio[:ramp] *= np.linspace(0, 1, ramp)

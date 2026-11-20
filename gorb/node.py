@@ -23,6 +23,7 @@ from .transport import Transport
 log = logging.getLogger("gorb")
 
 CHUNK = 180  # payload bytes per DATA packet; small chunks survive bad signal better
+CANCEL_ROUND = 250  # RESEND round number used for "stop, I have it"
 NARROW_FRAME = 250  # biggest packet every radio can carry (ESP-NOW: 250, LoRa: 255)
 DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?\.gorb$")
 CALLSIGN_RE = re.compile(r"^[A-Za-z0-9/-]{3,20}$")
@@ -77,6 +78,7 @@ class _Pending:
     total: int = 0
     error: str | None = None
     hops: int = 0
+    blob: bytes | None = None  # filled from an overheard copy (Gorb Echo)
     event: threading.Event = field(default_factory=threading.Event)
     last_activity: float = field(default_factory=time.monotonic)
 
@@ -127,6 +129,12 @@ class Node:
         self._pending: dict[int, _Pending] = {}
         self._responses: OrderedDict[tuple, tuple[list[bytes], float]] = OrderedDict()
         self._building: set[tuple[str, int]] = set()
+        # Chunks queued but not yet on air, per request: a repeated GET/RESEND
+        # must not queue the same chunks again (lab finding: several people
+        # asking at once used to snowball into hours of duplicate copies).
+        self._unsent: dict[tuple[str, int], set[int]] = {}
+        self._paced: set[tuple[str, int]] = set()  # requests that came through a relay
+        self._cancelled: OrderedDict[tuple[str, int], bool] = OrderedDict()  # requester has it
         self._lock = threading.RLock()
         # Small things go first: requests, relays and short replies (pages,
         # picture previews) jump ahead of long replies (full pictures, video).
@@ -168,6 +176,12 @@ class Node:
                 _, _, pkt = self._txq.get(timeout=0.5)
             except queue.Empty:
                 continue
+            if pkt.type == PacketType.DATA and (pkt.dst, pkt.msg_id) in self._cancelled:
+                with self._lock:
+                    left = self._unsent.get((pkt.dst, pkt.msg_id))
+                    if left is not None:
+                        left.discard(pkt.seq)
+                continue  # they already have the page
             frame = pkt.encode()
             # Rule 3 / rule 5: listen before talking and never hog the channel.
             waited = 0.0
@@ -187,6 +201,19 @@ class Node:
                 continue
             self._tx_time += air
             self.stats["tx"] += 1
+            if pkt.type == PacketType.DATA:
+                req = (pkt.dst, pkt.msg_id)
+                with self._lock:
+                    left = self._unsent.get(req)
+                    if left is not None:
+                        left.discard(pkt.seq)
+                        if not left:
+                            self._unsent.pop(req, None)
+                    paced = req in self._paced
+                if paced:
+                    # The reply goes through a relay, which can only repeat it
+                    # in the gaps between our packets: leave it some room.
+                    time.sleep(max(0.3, 2 * air))
             log.debug("TX %s %s->%s #%d seq=%d", pkt.type.name, pkt.src, pkt.dst, pkt.msg_id, pkt.seq)
 
     def _beacon_loop(self) -> None:
@@ -224,6 +251,14 @@ class Node:
                   pkt.msg_id, pkt.seq, pkt.hops)
         if self.echo:
             self._echo_listen(pkt)
+        if pkt.type in (PacketType.DATA, PacketType.WAIT) and pkt.dst != self.callsign:
+            # The host we're waiting for is busy sending to someone else: it's
+            # alive, so keep waiting instead of asking again.
+            now = time.monotonic()
+            with self._lock:
+                for p in self._pending.values():
+                    if p.domain == pkt.src:
+                        p.last_activity = now
         for_me = self._handle(pkt)
         if self.relay and not for_me and pkt.ttl > 0:
             self._schedule_relay(pkt)
@@ -282,6 +317,12 @@ class Node:
             while self._echo_bytes > self.ECHO_MAX_BYTES and self._echo:
                 _, (b, _) = self._echo.popitem(last=False)
                 self._echo_bytes -= len(b)
+            # Anyone here still waiting for this page can stop now: we just
+            # overheard the whole thing sent to someone else.
+            for p in self._pending.values():
+                if p.domain == domain and p.path == path and p.blob is None:
+                    p.blob = blob
+                    p.event.set()
 
     def _echo_listen(self, pkt: Packet) -> None:
         """Collect replies we overhear (including ones addressed to others)."""
@@ -468,6 +509,12 @@ class Node:
                 self._building.discard(key)
 
     def _resend(self, pkt: Packet) -> None:
+        if not pkt.payload:  # "I have it now", possibly before we even built it
+            with self._lock:
+                self._cancelled[(pkt.src, pkt.msg_id)] = True
+                while len(self._cancelled) > 500:
+                    self._cancelled.popitem(last=False)
+            return
         with self._lock:
             cached = self._responses.get((pkt.src, pkt.msg_id))
         if cached is None:
@@ -476,6 +523,8 @@ class Node:
         try:
             wanted = [int(s) for s in pkt.payload.decode().split(",") if s]
         except ValueError:
+            return
+        if not wanted:
             return
         self._send_chunks(pkt, chunks, [s for s in wanted if 0 <= s < len(chunks)], pkt.round)
 
@@ -498,8 +547,21 @@ class Node:
         return max(32, min(chunk, max_frame - len(overhead)))
 
     def _send_chunks(self, req: Packet, chunks: list[bytes], seqs, rnd: int) -> None:
-        ttl = max(self.ttl, req.hops + 1)
-        for seq in seqs:
+        # Reply as far as the request travelled: a request we heard directly
+        # gets a reply nobody needs to relay (lab finding: pointless relays
+        # tripled channel use). Retries get one extra hop in case the link
+        # only works one way.
+        ttl = req.hops + (1 if rnd > 0 else 0)
+        key = (req.src, req.msg_id)
+        with self._lock:
+            unsent = self._unsent.setdefault(key, set())
+            todo = [s for s in seqs if s not in unsent]  # don't queue what's still waiting
+            unsent.update(todo)
+            if req.hops > 0 and getattr(self.transport, "relay_useful", True):
+                self._paced.add(key)
+                if len(self._paced) > 200:
+                    self._paced.pop()
+        for seq in todo:
             self._send(Packet(PacketType.DATA, req.dst, req.src, chunks[seq], req.msg_id,
                               seq, len(chunks), ttl=ttl, round=rnd))
 
@@ -522,7 +584,7 @@ class Node:
             if p.total and len(p.chunks) >= p.total:
                 p.event.set()
 
-    def fetch(self, url: str, timeout: float = 120.0, retries: int = 6) -> Page:
+    def fetch(self, url: str, timeout: float = 900.0, retries: int = 6) -> Page:
         """Request a page over the air and wait for it to arrive."""
         domain, path = parse_url(url)
         started = time.monotonic()
@@ -586,6 +648,16 @@ class Node:
                                       msg_id, ttl=self.ttl, round=rnd, narrow=self.narrow))
             if p.error:
                 raise GorbError(p.error)
+            if p.blob is not None:
+                self.stats["echo_hits"] += 1
+                # Tell the host to stop sending our copy: an empty RESEND means
+                # "I need nothing more" (older hosts simply ignore it).
+                self._send(Packet(PacketType.RESEND, self.callsign, domain, b"", msg_id,
+                                  ttl=self.ttl, round=CANCEL_ROUND))
+                page = self._decode_page(f"gorb://{domain}{path}", p.blob, p.hops,
+                                         time.monotonic() - started)
+                page.from_echo = True
+                return page
             blob = b"".join(p.chunks[i] for i in range(p.total))
             page = self._decode_page(f"gorb://{domain}{path}", blob, p.hops,
                                      time.monotonic() - started)

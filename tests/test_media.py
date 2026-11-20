@@ -225,6 +225,41 @@ class EchoTest(unittest.TestCase):
         self.assertEqual(host.stats["served"], 1)  # the host was never asked again
         self.assertEqual(relay.stats["echo_served"], 1)
 
+    def test_crowd_loading_same_page(self):
+        """Five people ask for the same page at once over a slow radio. Before
+        the lab's fixes most of them failed and the host queued hundreds of
+        duplicate packets; now they all finish from one overheard copy."""
+        import random
+        import threading
+        rnd = random.Random(1)
+        text = "".join(rnd.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(4000))
+        (Path(self.dir.name) / "index.html").write_text("<h1>news</h1>" + text)
+        host = Node(SimTransport(self._ch, 0, 0, 10, realtime=True, speed=4), "HOST-1",
+                    {"news.gorb": self.dir.name}, beacon_interval=0).start()
+        people = [Node(SimTransport(self._ch, 3, i, 10, realtime=True, speed=4), f"USER-{i}",
+                       beacon_interval=0).start() for i in range(5)]
+        self.nodes += [host, *people]
+        got = {}
+
+        def go(n):
+            try:
+                got[n.callsign] = n.fetch("gorb://news.gorb/", timeout=120).text[:13]
+            except Exception as e:  # noqa: BLE001
+                got[n.callsign] = str(e)
+
+        threads = [threading.Thread(target=go, args=(n,)) for n in people]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sorted(got.values()), ["<h1>news</h1>"] * 5)
+        # The others' copies get cancelled ("I have it") instead of sent.
+        deadline = time.time() + 15
+        while host._txq.qsize() and time.time() < deadline:
+            time.sleep(0.5)
+        self.assertEqual(host._txq.qsize(), 0)
+        self.assertLess(host.stats["tx"], 2 * 22)  # about one copy went out, not five
+
     def test_echo_can_be_switched_off(self):
         host = self.node("HOST-1", 0, site_dirs={"news.gorb": self.dir.name})
         alice = self.node("ALICE", 5)

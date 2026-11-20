@@ -76,12 +76,14 @@ class SimTransport(Transport):
         noise: float = 0.05,
         loss: float = 0.0,
         realtime: bool = False,
+        speed: float = 1.0,
     ):
         # 9600 Hz keeps simulated frames small enough for one UDP datagram.
         super().__init__(ModemConfig(sample_rate=9600, preamble_ms=30))
         self.port = _SIM_BASE_PORT + channel
         self.x, self.y, self.range = x, y, range_
         self.noise, self.loss, self.realtime = noise, loss, realtime
+        self.speed = speed  # with realtime: airtime runs this many times faster (10 ~ LoRa)
         self.station_id = os.urandom(8)
         self.demod = Demodulator(self.config)
         self._on_frame: FrameHandler | None = None
@@ -114,13 +116,13 @@ class SimTransport(Transport):
         head = _SIM_HEAD.pack(b"GSIM", self.station_id, self.x, self.y, self.range, len(audio))
         self.tx.sendto(head + pcm, (_SIM_GROUP, self.port))
         if self.realtime:
-            time.sleep(len(audio) / self.config.sample_rate)
+            time.sleep(len(audio) / self.config.sample_rate / self.speed)
         else:
             time.sleep(0.002)  # keep the receivers from being flooded
 
     def airtime(self, nbytes: int) -> float:
         # Without --realtime the simulated band delivers instantly.
-        return super().airtime(nbytes) if self.realtime else 0.005
+        return super().airtime(nbytes) / self.speed if self.realtime else 0.005
 
     def _rx_loop(self) -> None:
         while not self._closed:
@@ -139,7 +141,7 @@ class SimTransport(Transport):
                 continue  # out of radio range: we can't hear them
             audio = np.frombuffer(data[_SIM_HEAD.size :], dtype="<i2").astype(np.float32) / 32767
             duration = len(audio) / self.config.sample_rate
-            self._busy_until = time.monotonic() + (duration if self.realtime else 0.02)
+            self._busy_until = time.monotonic() + (duration / self.speed if self.realtime else 0.02)
             if random.random() < self.loss:
                 continue
             if self.noise:

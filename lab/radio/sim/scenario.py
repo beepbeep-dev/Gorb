@@ -81,23 +81,31 @@ def make(seed, n=60, size=3000.0, layout="uniform", lora_frac=1.0, n_hosts=4, n_
     loads.sort()
     # multi-channel: hosts get channels round robin; others join the cell of
     # the host they hear best
-    home = {}
-    if lora_channels > 1:
-        hl = list(pages.values())
-        for i, (h, _) in enumerate(hl):
-            home[h] = i % lora_channels
-        g = world.gain["sub"]
-        for s in range(n):
-            if s not in home:
-                best = max(hl, key=lambda hp: g[s, hp[0]])
-                home[s] = home[best[0]]
+    home = channel_cells(world, pages, lora_channels)
     return Scenario(world, pages, loads, home, {"seed": seed, "n": n, "size": size,
                                                 "layout": layout, "lora_frac": lora_frac})
 
 
+def channel_cells(world, pages, k):
+    """Multi-channel idea: hosts get LoRa channels round robin; every other
+    station listens on the channel of the host it hears best ("cells")."""
+    home = {}
+    if k <= 1:
+        return home
+    hl = list(pages.values())
+    for i, (h, _) in enumerate(hl):
+        home[h] = i % k
+    g = world.gain["sub"]
+    for s in range(world.n):
+        if s not in home:
+            best = max(hl, key=lambda hp: g[s, hp[0]])
+            home[s] = home[best[0]]
+    return home
+
+
 def run(scn: Scenario, cfg: Cfg, seed=0, sim_kw=None, extra=None):
     sim = Sim(scn.world, seed, **(sim_kw or {}))
-    home = scn.home if cfg.lora_channels > 1 else {}
+    home = channel_cells(scn.world, scn.pages, cfg.lora_channels) if cfg.lora_channels > 1 else {}
     net = Net(sim, cfg, scn.pages, home)
     for t, r, page in scn.loads:
         sim.at(t, net.nodes[r].start_fetch, page)

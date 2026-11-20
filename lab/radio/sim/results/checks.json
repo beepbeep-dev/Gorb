@@ -1,0 +1,200 @@
+{
+ "airtime": [
+  {
+   "mode": "SF7/125k",
+   "bytes": 20,
+   "expected_ms": 56.6,
+   "sim_ms": 56.6
+  },
+  {
+   "mode": "SF12/125k",
+   "bytes": 20,
+   "expected_ms": 1318.9,
+   "sim_ms": 1318.9
+  },
+  {
+   "mode": "SF9/125k",
+   "bytes": 20,
+   "expected_ms": 185.3,
+   "sim_ms": 185.3
+  },
+  {
+   "mode": "SF10/125k",
+   "bytes": 51,
+   "expected_ms": 616.4,
+   "sim_ms": 616.4
+  },
+  {
+   "mode": "LoRa SF8/500k (Gorb)",
+   "bytes": 215,
+   "expected_ms": null,
+   "sim_ms": 151.2
+  },
+  {
+   "mode": "LoRa SF8/250k (Gorb)",
+   "bytes": 215,
+   "expected_ms": null,
+   "sim_ms": 302.3
+  }
+ ],
+ "aloha": [
+  {
+   "G": 0.1,
+   "S_sim": 0.079,
+   "S_theory": 0.082
+  },
+  {
+   "G": 0.25,
+   "S_sim": 0.156,
+   "S_theory": 0.152
+  },
+  {
+   "G": 0.5,
+   "S_sim": 0.186,
+   "S_theory": 0.184
+  },
+  {
+   "G": 0.75,
+   "S_sim": 0.169,
+   "S_theory": 0.167
+  },
+  {
+   "G": 1.0,
+   "S_sim": 0.141,
+   "S_theory": 0.135
+  },
+  {
+   "G": 1.5,
+   "S_sim": 0.088,
+   "S_theory": 0.075
+  },
+  {
+   "G": 2.0,
+   "S_sim": 0.046,
+   "S_theory": 0.037
+  }
+ ],
+ "csma": [
+  {
+   "G": 0.25,
+   "S_sim": 0.234,
+   "S_theory": null
+  },
+  {
+   "G": 0.5,
+   "S_sim": 0.435,
+   "S_theory": null
+  },
+  {
+   "G": 1.0,
+   "S_sim": 0.647,
+   "S_theory": null
+  },
+  {
+   "G": 2.0,
+   "S_sim": 0.66,
+   "S_theory": null
+  }
+ ],
+ "ranges": [
+  {
+   "mode": "LoRa SF7/125k",
+   "sens_dBm": -123.5,
+   "kbit_s": 5.5,
+   "air_215B_ms": 338.18,
+   "range_out_m": 3243,
+   "range_1in_m": 1614,
+   "range_2in_m": 803
+  },
+  {
+   "mode": "LoRa SF12/125k",
+   "sens_dBm": -136.0,
+   "kbit_s": 0.3,
+   "air_215B_ms": 7708.67,
+   "range_out_m": 7757,
+   "range_1in_m": 3861,
+   "range_2in_m": 1922
+  },
+  {
+   "mode": "LoRa SF5/500k",
+   "sens_dBm": -112.5,
+   "kbit_s": 62.5,
+   "air_215B_ms": 29.26,
+   "range_out_m": 1503,
+   "range_1in_m": 748,
+   "range_2in_m": 372
+  },
+  {
+   "mode": "LoRa SF7/500k",
+   "sens_dBm": -117.5,
+   "kbit_s": 21.9,
+   "air_215B_ms": 84.54,
+   "range_out_m": 2131,
+   "range_1in_m": 1060,
+   "range_2in_m": 528
+  },
+  {
+   "mode": "LoRa SF8/500k",
+   "sens_dBm": -120.0,
+   "kbit_s": 12.5,
+   "air_215B_ms": 151.17,
+   "range_out_m": 2537,
+   "range_1in_m": 1262,
+   "range_2in_m": 628
+  },
+  {
+   "mode": "LoRa SF8/250k",
+   "sens_dBm": -123.0,
+   "kbit_s": 6.2,
+   "air_215B_ms": 302.34,
+   "range_out_m": 3129,
+   "range_1in_m": 1558,
+   "range_2in_m": 775
+  },
+  {
+   "mode": "Wi-Fi LR 250k",
+   "sens_dBm": -104.0,
+   "kbit_s": 250.0,
+   "air_215B_ms": 8.64,
+   "range_out_m": 347,
+   "range_1in_m": 140,
+   "range_2in_m": 57
+  },
+  {
+   "mode": "Wi-Fi LR 500k",
+   "sens_dBm": -101.0,
+   "kbit_s": 500.0,
+   "air_215B_ms": 4.51,
+   "range_out_m": 281,
+   "range_1in_m": 114,
+   "range_2in_m": 46
+  },
+  {
+   "mode": "ESP-NOW 1M",
+   "sens_dBm": -97.0,
+   "kbit_s": 1000.0,
+   "air_215B_ms": 2.26,
+   "range_out_m": 213,
+   "range_1in_m": 86,
+   "range_2in_m": 35
+  },
+  {
+   "mode": "ESP-NOW 11M",
+   "sens_dBm": -88.0,
+   "kbit_s": 11000.0,
+   "air_215B_ms": 0.38,
+   "range_out_m": 114,
+   "range_1in_m": 46,
+   "range_2in_m": 19
+  },
+  {
+   "mode": "ESP-NOW 54M",
+   "sens_dBm": -74.0,
+   "kbit_s": 54000.0,
+   "air_215B_ms": 0.07,
+   "range_out_m": 28,
+   "range_1in_m": 11,
+   "range_2in_m": 5
+  }
+ ]
+}

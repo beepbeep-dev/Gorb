@@ -314,6 +314,7 @@ class Iface:
                 gap += 314e-6  # SIFS + ACK at 1 Mbit/s
         else:
             gap = 2e-3  # radio turnaround + SPI
+        gap += getattr(t.pkt, "gap", 0.0) if t.node == self.sid and t.pkt.hops == 0 else 0.0
         sim.after(gap, self._wake)
 
     def _wake(self):

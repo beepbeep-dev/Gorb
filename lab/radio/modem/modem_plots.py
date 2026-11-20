@@ -70,7 +70,10 @@ def plot_all(data, out, suffix=""):
             if len(x):
                 ax.plot(x, y, label=names[k], ms=5, **STYLE[k])
         x, y = adaptive(res, chan)
-        ax.plot(x, y, color=INK, lw=1.2, ls=":", label="Modem 2 adaptive (best OFDM mode)", zorder=0)
+        ax.plot(x, y, color=INK, lw=1.4, ls=":", label="Modem 2 adaptive (best OFDM mode)", zorder=0)
+        x2, y2 = adaptive(res, chan, OFDM + ["4fsk-1/2", "4fsk-3/4"])
+        if np.any(y2 > y):
+            ax.plot(x2, y2, color=INK2, lw=1.0, ls="-.", label="adaptive incl. 4FSK fallback", zorder=0)
         ax.set_xlabel("SNR in 300-3000 Hz (dB)")
         ax.set_ylabel("goodput, 220-byte packets (bit/s)")
         ax.set_title(CHAN_TITLE[chan] + "\ngoodput = payload delivered / airtime incl. 250 ms leader", loc="left")
@@ -80,7 +83,7 @@ def plot_all(data, out, suffix=""):
         fig.savefig(os.path.join(out, f"goodput_{tag}{suffix}.png"), dpi=120)
         plt.close(fig)
         # FER
-        fig, ax = plt.subplots(figsize=(9, 5.4), facecolor=SURFACE)
+        fig, ax = plt.subplots(figsize=(10.5, 5.4), facecolor=SURFACE)
         _style(ax)
         for k in keys:
             x, y = _series(res, chan, k, "fer")
@@ -94,7 +97,7 @@ def plot_all(data, out, suffix=""):
         ax.set_xlabel("SNR in 300-3000 Hz (dB)")
         ax.set_ylabel("frame error rate")
         ax.set_title(CHAN_TITLE[chan], loc="left")
-        ax.legend(fontsize=8, frameon=False, loc="lower left")
+        ax.legend(fontsize=8, frameon=False, loc="center left", bbox_to_anchor=(1.0, 0.5))
         fig.tight_layout()
         fig.savefig(os.path.join(out, f"fer_{tag}{suffix}.png"), dpi=120)
         plt.close(fig)

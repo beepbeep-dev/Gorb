@@ -39,7 +39,7 @@ class Cfg:
     chunk: int = 180
     header: int = 35
     retries: int = 6
-    timeout: float = 300.0
+    timeout: float = 120.0  # gorb/node.py fetch() default
     lora_mode: object = phy.US915
     wifi_mode: object = phy.ESPNOW
     duty: float = 0.5  # rules.MAX_TX_DUTY (US); EU868 0.1
@@ -61,6 +61,7 @@ class Cfg:
     # concurrent transmission flooding
     ct_spacing: int = 4  # slots between chunk floods (pipelining when < ttl + 1)
     ct_jitter: float = 30e-6  # trigger jitter of the relay radio (s, std dev)
+    pace: float = 0.0  # host leaves pace * airtime * (hops-1, max 2) of silence after each chunk
     fast_repair: bool = False  # ask for missing chunks after a short silence (not ~5 s)
     carousel: float = 0.0  # >0: host pushes its popular page every this many seconds
     name: str = "baseline"
@@ -93,7 +94,7 @@ def link_cost(margin_db):
 
 class Pkt:
     __slots__ = ("type", "src", "dst", "msg", "seq", "total", "ttl", "hops", "rnd", "size",
-                 "page", "nh", "h", "need", "chan", "c")
+                 "page", "nh", "h", "need", "chan", "c", "wide", "gap")
 
     def __init__(self, type, src, dst, msg, seq=0, total=0, ttl=3, hops=0, rnd=0, size=40,
                  page=-1, nh=-1, h=99, need=0, chan=0):
@@ -101,6 +102,8 @@ class Pkt:
         self.total, self.ttl, self.hops, self.rnd, self.size = total, ttl, hops, rnd, size
         self.page, self.nh, self.h, self.need, self.chan = page, nh, h, need, chan
         self.c = 0.0  # sender's path cost back to where this packet started
+        self.wide = False  # "the narrow path failed last round: spread out"
+        self.gap = 0.0  # pacing: the sender stays quiet this long after sending it
 
     @property
     def key(self):
@@ -111,6 +114,7 @@ class Pkt:
                 self.hops + 1, self.rnd, self.size, self.page, self.nh, self.h, self.need,
                 self.chan)
         p.c = self.c
+        p.wide = self.wide
         for k, v in kw.items():
             setattr(p, k, v)
         return p
@@ -301,7 +305,9 @@ class Node:
                 return self.sim.after(0.05, self._relay_fire, pkt.relayed(nh=-1), cfg.suppress, None)
             self.stats["relayed"] += 1
             return self.route_send(pkt.relayed(nh=nxt, c=self.d_req.get(pkt.msg, 0)), nxt)
-        if mode == "route" and pkt.type == DATA:
+        if mode == "route" and pkt.type == DATA and pkt.nh < 0:
+            mode = "gradient"  # no single path known / it failed: spread like gradient
+        elif mode == "route" and pkt.type == DATA:
             if pkt.nh != self.sid:
                 return
             nxt = self.parent.get(pkt.msg)
@@ -311,7 +317,7 @@ class Node:
             return self.route_send(pkt.relayed(nh=nxt, c=self.d_host.get(pkt.msg, 0)), nxt,
                                    prio=pkt.total)
         sens = tx.mode.sens_dbm
-        if mode == "flood" or mode == "route":
+        if mode == "flood" or (mode == "route" and pkt.type != DATA):
             delay = self.sim.rng.uniform(0.05, 0.4)
             if "sub" in self.ifaces:
                 delay += 0.5 * cfg.lora_mode.airtime(pkt.size)
@@ -346,7 +352,7 @@ class Node:
         key = pkt.key
         if self.seen.get(key, 0) > limit:
             return
-        if mine is not None and self.minh.get(key, 99) <= mine:
+        if mine is not None and self.minh.get(key, 99) <= mine and not pkt.wide:
             return  # someone as close as us already repeated it
         self.stats["relayed"] += 1
         h = mine if mine is not None else pkt.h
@@ -356,8 +362,12 @@ class Node:
             c = self.d_req.get(pkt.msg, pkt.c + 1)
             if pkt.type == RESEND:
                 h = mine if mine is not None else self.d_host.get(pkt.msg, pkt.h)
+        if pkt.wide:
+            h = 99.0
         if mine is None:
             drop = lambda: self.seen.get(key, 0) > limit
+        elif pkt.wide:
+            drop = lambda: self.seen.get(key, 0) > 2
         else:
             drop = lambda: self.minh.get(key, 99) <= mine
         self.emit(pkt.relayed(h=h, c=c), pkt.total if pkt.type == DATA else 0, drop)
@@ -499,8 +509,13 @@ class Node:
                 dst, msg = -1 - req.page, req.page
             else:
                 dst, msg = req.src, req.msg
+            wide = req.type == RESEND and req.wide
             out.append(Pkt(DATA, src_id, dst, msg, s, total, ttl, 0, rnd, cfg.header + nbytes,
-                           req.page, self.parent.get(req.msg, -1), h, chan=req.chan))
+                           req.page, -1 if wide else self.parent.get(req.msg, -1),
+                           99.0 if wide else h, chan=req.chan))
+            if cfg.pace:
+                hops = min(max(req.hops, 0), 2)  # relays the GET went through
+                out[-1].gap = cfg.pace * cfg.lora_mode.airtime(out[-1].size) * hops
         return out
 
     def start_send(self, req, src_id, seqs=None):
@@ -662,13 +677,13 @@ class Node:
             self.sim.at(max(f.last + lim, now + 1e-3), self.check, f)
             return
         f.rnd += 1
-        if f.rnd > cfg.retries:
+        if f.rnd > cfg.retries and not cfg.fast_repair:  # fast repair: keep asking until timeout
             return self.finish(f, False)
         f.last = now
         if f.total:
             if cfg.coding:
                 src = sum(1 for q in f.chunks if q < f.total)
-                need = max(f.total - len(f.chunks), 0) if src < f.total else 0
+                need = max(f.total + 1 - len(f.chunks), 0) if src < f.total else 0
                 need = max(need, 1)
                 p = Pkt(RESEND, self.sid, f.host, f.msg, ttl=cfg.ttl, rnd=f.rnd,
                         size=cfg.header + 4, page=f.page, need=need, chan=f.chan)
@@ -683,9 +698,14 @@ class Node:
                         chars += c
                 p = Pkt(RESEND, self.sid, f.host, f.msg, ttl=cfg.ttl, rnd=f.rnd,
                         size=cfg.header + chars, page=f.page, need=missing, chan=f.chan)
+            f.asked_next = len(missing) if not cfg.coding else need
             p.h = self.d_host.get(f.msg, 99)
-            progress = len(f.chunks) > getattr(f, "last_count", -1)
+            asked = getattr(f, "asked", 0)
+            progress = len(f.chunks) - getattr(f, "last_count", 0) >= 0.5 * asked
             f.last_count = len(f.chunks)
+            f.asked = getattr(f, "asked_next", 0)
+            if not progress and cfg.relay in ("gradient", "route"):
+                p.wide, p.h = True, 99.0  # last round got nothing: let every relay help
             if cfg.relay == "route" and f.msg in self.up and progress:
                 p.nh = self.up[f.msg]
                 self.remember(p.key)

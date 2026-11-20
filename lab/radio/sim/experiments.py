@@ -140,7 +140,8 @@ def experiments():
         "variants": [],
     }
     for scn in ("suburb1", "suburb4", "suburb40k"):
-        to = 900.0 if scn == "suburb40k" else 300.0
+        to = 900.0 if scn == "suburb40k" else 120.0
+        L = dict(LORA_ONLY, retries=20) if scn == "suburb40k" else LORA_ONLY
         E["relay"]["variants"] += [
             V("baseline flood", scn, dict(L, timeout=to)),
             V("RSSI timer (Meshtastic-like)", scn, dict(L, relay="rssi", suppress=1, timeout=to)),
@@ -148,7 +149,9 @@ def experiments():
             V("route (unicast reverse path)", scn, dict(L, relay="route", timeout=to)),
             V("CT flood (Glossy-style)", scn, dict(L, relay="ct", timeout=to)),
             V("CT flood, pipelined (3 slots)", scn, dict(L, relay="ct", ct_spacing=3, timeout=to)),
+            V("route + host pacing", scn, dict(L, relay="route", pace=1.0, timeout=to)),
         ]
+    L = LORA_ONLY
     E["ct"] = {
         "title": "Idea 2: how sensitive concurrent-transmission flooding is to timing",
         "variants": [
@@ -175,8 +178,9 @@ def experiments():
                                                     coding=True, redundancy=0.1)),
             V("gradient + fast + combining", scn, dict(L, relay="gradient", fast_repair=True,
                                                        combining=True)),
-            V("route + fast + coding", scn, dict(L, relay="route", fast_repair=True,
-                                                 coding=True, redundancy=0.1)),
+            V("route + coding", scn, dict(L, relay="route", coding=True, redundancy=0.1)),
+            V("route + coding + pacing", scn, dict(L, relay="route", coding=True, redundancy=0.1,
+                                                   pace=1.0)),
         ]
     E["sf"] = {
         "title": "Idea 4: LoRa data rate (network-wide preset, and per-link adaptive)",
@@ -256,14 +260,26 @@ def experiments():
         "title": "Best combination vs. today's Gorb",
         "variants": [],
     }
-    best = dict(relay="gradient", fast_repair=True, coding=True, redundancy=0.1)
-    for scn in ("suburb1", "suburb4", "suburb40k", "mixed"):
-        to = 900.0 if scn == "suburb40k" else 300.0
-        base = dict(L) if scn != "mixed" else {}
+    best = dict(relay="route", coding=True, redundancy=0.1, pace=1.0)
+    for scn in ("suburb1", "suburb4", "suburb40k", "mixed", "popular"):
+        to = 900.0 if scn == "suburb40k" else 120.0
+        base = dict(LORA_ONLY) if scn != "mixed" else {}
+        if scn == "suburb40k":
+            base["retries"] = 20
         E["stack"]["variants"] += [
             V("today's Gorb", scn, dict(base, timeout=to)),
-            V("gradient + fast repair + coding", scn, dict(base, timeout=to, **best)),
+            V("Smart stack: route + coding + pacing", scn, dict(base, timeout=to, **best)),
         ]
+        if scn in ("suburb4", "popular"):
+            E["stack"]["variants"] += [
+                V("Smart stack + page-addressed", scn, dict(base, timeout=to, page_addr=True, **best)),
+            ]
+            if scn == "suburb4":
+                E["stack"]["variants"].append(
+                    V("Smart stack + 4 LoRa channels", scn, dict(base, timeout=to, lora_channels=4, **best)))
+            E["stack"]["variants"] += [
+                V("Smart stack + SF6", scn, dict(base, timeout=to, lora_mode=phy.lora(6, 500), **best)),
+            ]
     return E
 
 
